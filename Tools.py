@@ -180,7 +180,12 @@ class Tools:
 
     def execute(self,func_name:str,*args,**kwargs):
         if func_name in self.tool_list:
-            return self.tool_list[func_name](*args,**kwargs)
+            result = None
+            try:
+                result = self.tool_list[func_name](*args,**kwargs)
+            except Exception as e:
+                raise RuntimeError(f"工具 {func_name} 抛出异常: {str(e)}")
+            return result
         else:
             raise ValueError(f"Function {func_name} not found in tool list.")
 
