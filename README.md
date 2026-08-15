@@ -1,7 +1,8 @@
 # single_agent_trail
 an trail for single agent
 
-这是一个个人使用的LaTeX编写与数学物理讨论一体化Agent
+这是一个个人使用的LaTeX编写与数学物理讨论一体化Agent，同时工程代码与理论代码有所不同，它不侧重于抽象问题在不断扩充，而是着眼于解决问题
+高消耗/CPU 密集/阻塞函数 → 注册为同步函数（走 to_thread）；只有 IO 等待型函数 → 才写成协程。
 
 目标：
 准备实现的内容：
@@ -37,3 +38,9 @@ an trail for single agent
     Agent_1->Bus->Agent_2
 
     Agent_exe->tool
+
+消息总线：
+    将所有模块间的消息通过总线传递
+    消息总线上挂载的executer负责将msg解包为args并通过对应的tool.executer执行
+
+    这里有一个问题：executer执行之后，对方不知道自己因该在哪里播报自己的结果，但是这不是问题，我们把一个约定的字段设为recall来表示回拨路径
