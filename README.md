@@ -1,0 +1,39 @@
+# single_agent_trail
+an trail for single agent
+
+这是一个个人使用的LaTeX编写与数学物理讨论一体化Agent
+
+目标：
+准备实现的内容：
+加入MCP合作机制，设计结构：
+    一个Super用来接收用户请求，进行请求理解，流程设计(设计为一张又向图)，并且在用户许可时可以更改其他Agent的提示词，同时他要负责在每次对话将要结束时对对话进行复盘，判断哪些功能在之后的工作中有被集成为Tool的价值
+
+    一个Math专家负责对OCR给出的结果进行逻辑判断，它不能直接写入代码，只能读取文件，并与用户讨论数学问题；他需要在讲解时保持亲和力，并不断对用户追问确保用户理解正确，它还可以通过设置谬论的方式对用户进行困扰，引导用户思考问题本质。
+
+    一个MathWrite专家负责将其他Agent的输出转写为LaTeX代码，在涉及到定理，引理，定义，证明的书写时，他必须根据tools的指示进行填写，同时确保自己所使用的LaTeX代码正确，它还要利用这项能力辅助Math对OCR检验。
+
+    一个PassageWrite的专家负责设计篇章结构，管理MathWrite的编写位置，并将Super,Math与用户的对话总结（不是摘录）成重点突出的LaTeX文档
+
+    一个Draw负责进行Tikz绘图
+
+    一个Listener负责监听音频API接口，有必要时汇报给PassageWriter与Super对课堂内容进行记录，
+
+功能：
+    联网功能
+    LaTeX编写相关功能
+    听写功能
+    流式IO支持
+
+已实现功能：
+
+    单个Agent，支持异步
+    本地OCR
+    使用Tools对工具进行注册
+    一个未全面竣工的本地保存数据库
+
+
+程序结构：
+    Agent cyc waiting for message
+    Agent_1->Bus->Agent_2
+
+    Agent_exe->tool
