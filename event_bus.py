@@ -10,21 +10,14 @@ import queue
 class EOW(Exception):
     pass
 
-async def executer(tool_list:Tools,func_name:str,msg:Message):
-    '''执行函数功能的工具，Tools中的总线回传尚未完成'''
-    # print(f'{func_name} 以 {msg.content} 执行')
-    # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
-    result = await tool_list.async_execute(func_name=func_name,**msg.content)       #Tools内置保护，不用过设计  
-    # if handler == None:
-    #     handler = func_name                                             #默认使用工具注册时的函数名作为handler
-    return result
+
 
 class Message():
     '''一个完整的消息字段，包含了发出者(title)内容(content)，未来可以扩充'''
     def __init__(self,title:str = None,content:Any = None):
         self.content:dict = content                                  #强制返回字典
         self.title:str = title
-        self.recall:str = None                                      #回拨地址，为空则在自己的频道广播
+        self.reply:str = None                                      #回拨地址，为空则在自己的频道广播
         return None
 
     def msg_set(self,title:str,content:Any):
@@ -34,10 +27,12 @@ class Message():
 
 class Bus():
     EOWM  = Message('Task_end')         #End Of Work Mark
-    def __init__(self,tools : Tools = None):
+    def __init__(self,tools : Tools = None,max_concurrency:int = 5):
         self.handler = {} #handler注册队列
         self.message_queue = asyncio.Queue(-1)     #消息队列，长度不设限
         self.tools = tools if tools is not None else Tools()
+        self.semaphore = asyncio.Semaphore(max_concurrency)        #并发数限制，默认5个
+        self.max_concurrent_tasks = max_concurrency
         # print(f'testttt{tools.tool_list}')
 
     def registry(self,event_name:str):          #事件注册
@@ -71,9 +66,15 @@ class Bus():
 
     def exception_submit(self,error_list):
         '''异常提交程序，需要配合外部函数规定的提交接口提交'''
+
         pass
 
+    def _ensure_semaphore(self):
+        if self.semaphore is None:
+            self.semaphore = asyncio.Semaphore(self.max_concurrent_tasks)
+
     async def deliver(self):                        #由于最终程序会异步化，所以在这里声明中加入了async但我不知道是否有必要
+        self._ensure_semaphore()
         while True:
             error_list = {}
             msg = await self.message_queue.get()
@@ -81,12 +82,11 @@ class Bus():
                 break
             # print(f'test{msg.content}')
             title = msg.title
-            tasks = [asyncio.create_task(executer(tool_list=self.tools,func_name=obj,msg=msg)) for obj in self.handler[title]]           #最终由封装过的异步执行器自主判断并执行
-            if tasks:
-                result = await asyncio.gather(*tasks,return_exceptions=True)
-                for e,name in zip(result,self.handler[title]):           # handler跨线程安全问题
-                    if isinstance(e,Exception):
-                        error_list[name] = e
+            for task in self.handler[title] :
+                asyncio.create_task(self.executer(
+                    func_name=task,
+                    msg=msg,
+                ))         #最终由封装过的异步执行器自主判断并执行
             self.exception_submit(error_list)
         while not self.message_queue.empty():
             self.message_queue.get_nowait()                    #退出前清空缓存的内容
@@ -94,4 +94,55 @@ class Bus():
 
     def _end(self):                                     #终止字符注入工具
         self.message_queue.put_nowait(self.EOWM)
+        return None
+
+    async def request(self, event_name: str, content: dict = None) -> list:
+        self.registry(event_name)
+        tasks = [self.ans_executer(fn, content) for fn in self.handler[event_name]]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    
+    async def request_alt(self, event_name: str, content: dict = None) -> list:
+        '''content中键入各个函数的参数'''
+        self.registry(event_name)
+        tasks  = []
+        for fn in self[event_name]:
+            if fn not in content:
+                content[fn] = {}
+            tasks.append(self.ans_executer(self,func_name=fn,**content[fn]))
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def call(self,request_list:dict = None):
+        tasks = []
+        for name,args in request_list.items():
+            tasks.append(self.ans_executer(name,**args))
+        return await asyncio.gather(*tasks,return_exceptions = True)
+
+    async def ans_executer(self,func_name:str,**msg):
+            '''执行函数功能的工具，回传，Tools中的总线回传尚未完成'''
+            # print(f'{func_name} 以 {msg.content} 执行')
+            # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
+            async with self.semaphore:
+                try:
+                    result = await self.tools.async_execute(func_name=func_name,**msg)
+                except TimeoutError as e:
+                    result = {'Title':'TimeoutError','content':{'Task': func_name,'Msg':msg,'error':e}}
+                except Exception as e:
+                    result = {'Title':'Error','content':{'Task': func_name,'Msg':msg,'error':e}}
+            # if handler == None:
+            #     handler = func_name                                             #默认使用工具注册时的函数名作为handler
+            return result
+
+    async def executer(self,func_name:str,msg:Message):
+        '''执行函数功能的工具，不回传，Tools中的总线回传尚未完成'''
+        # print(f'{func_name} 以 {msg.content} 执行')
+        # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
+        async with self.semaphore:
+            try:
+                await self.tools.async_execute(func_name=func_name,**msg.content)
+            except TimeoutError as e:
+                self.emit(event_name='TimeoutError',content={'Task': func_name,'Msg':msg,'error':e})
+            except Exception as e:
+                self.emit(event_name='Error',content={'Task': func_name,'Msg':msg,'error':e})
+        # if handler == None:
+        #     handler = func_name                                             #默认使用工具注册时的函数名作为handler
         return None

@@ -135,6 +135,7 @@ def function_to_model(func: Callable):
     return model
     
 class Tools:
+    '''工具注册表，工具必须返回dict'''
     def __init__(self):
         self.tool_list = {}         #存储函数列表，便于调用
         self.schema = []            #结构化描述文档，用于向API接口提供信息

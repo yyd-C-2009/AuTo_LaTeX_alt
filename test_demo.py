@@ -20,34 +20,47 @@
 # bus._end()
 # asyncio.run(bus.deliver())
 
+import time
 import asyncio
 from Tools import Tools
 from event_bus import Bus
 
-async def heartbeat():
-    for i in range(5):
-        await asyncio.sleep(0.5)
-        print(f"心跳 {i}")
 
-def slow_task(tag):
-    import time
-    time.sleep(2)        # 模拟 2 秒重任务（会走 to_thread，不卡循环）
-    print(f"[{tag}] 重任务完成")
+# —— 15 个重任务订阅者，每个 sleep 0.5 秒 ——
+for _i in range(15):
+    def worker(tag, idx=_i):                    # 用默认参数 idx 捕获 _i，避免闭包共用
+        time.sleep(0.5)
+    worker.__name__ = f"worker_{_i}"            # 每个函数名唯一，Tools 注册用
+    globals()[worker.__name__] = worker         # 挂到全局，方便后续引用名字
 
-def fast_task(tag):
-    print(f"[{tag}] 轻任务完成")
+def large_task(tag):
+    print('large')
+    time.sleep(10)
 
 async def main():
     tools = Tools()
-    tools.add_tool(slow_task, time_out=10)
-    tools.add_tool(fast_task, time_out=2)
+    for i in range(15):
+        tools.add_tool(globals()[f"worker_{i}"], time_out=5)
 
-    bus = Bus(tools)
-    bus.subscribe(event_name="ocr.done", func_name="slow_task")
-    bus.subscribe(event_name="ocr.done", func_name="fast_task")
+    tools.add_tool(large_task,5)
 
-    bus.emit("ocr.done", {"tag": "A"})
+    # —— 关键：设并发上限为 5 ——
+    bus = Bus(tools, max_concurrency=16)
+
+    for i in range(15):
+        bus.subscribe(f"worker_{i}", "batch.task")
+
+    bus.subscribe("large_task","batch.task")
+
+    start = time.time()
+    bus.emit("batch.task", {"tag": "x"})
     bus._end()
-    await asyncio.gather(bus.deliver(),heartbeat())
+    await bus.deliver()
+    elapsed = time.time() - start
 
+    print(f"\n===== max_concurrency=16 总耗时 {elapsed:.2f} 秒 =====")
+
+ss = time.time()
 asyncio.run(main())
+ed = time.time()
+print(f'total:{ed-ss}')
