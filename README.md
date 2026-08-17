@@ -101,3 +101,16 @@ OCR 改动：
 
 专家分区（待实现，之后再做）：
     - 每个专家独立线程/协程，无任务时挂起，有事件被 emit 唤醒（「常驻挂起」模型）。
+
+控制台 IO 锁（已实现）：
+    - Bus.io_print(text)：不带 input 的输出，只锁「写控制台」这一下（粒度最细，防多 Agent print 交错）。
+    - Bus.io_dialog(text)：带 input 的对话回合，把「一次输出 + 下一次输入」作为完整过程锁定；
+      等待输入时 await 挂起（不占用事件循环），返回用户输入。
+    - 语义：输出和输入一一对应，带 input 的对话回合同一时刻只能有一个工具执行。
+
+多轮交互式 Agent（TODO，下一步）：
+    - 把「Agent（专家/Super）的整轮对话」作为一个重任务挂在 pending 上（走 slow_task 机制），
+      支持 Agent 在 run_agent 中途「输出 → 等输入 → 继续」的多轮交互，而非一次性跑完。
+    - 下一步关键动作：把 expert 放入 slow_task 运行（通过 bus.submit 挂到 pending，
+      使其占用 IO 锁、等待输入时挂起，完成后从 pending 移除）。
+    - 注意：当前工具式子 Agent（被动被 Super 路由调用）已够用，暂不做「常驻挂起」主动模型。

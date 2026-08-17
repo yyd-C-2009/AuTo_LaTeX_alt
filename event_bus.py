@@ -48,6 +48,8 @@ class Bus():
         self.task_counter = 0                     # 自增 id 生成器
         self.slow_tasks = set()                   # 走 submit 的慢任务名集合
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
+        # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
+        self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
         # print(f'testttt{tools.tool_list}')
 
     def registry(self,event_name:str):          #事件注册
@@ -120,6 +122,23 @@ class Bus():
         self.message_queue.put_nowait(self.EOWM)
         return None
 
+    # ==================== 控制台 IO 锁（多 Agent 共享控制台） ====================
+
+    async def io_print(self, text: str = ""):
+        '''不带 input 的输出：只锁「写控制台」这一下（粒度最细，防止多 Agent print 交错）'''
+        async with self._io_lock:
+            print(text)
+
+    async def io_dialog(self, text: str = "") -> str:
+        '''带 input 的对话回合：把「一次输出 + 下一次输入」作为完整过程锁定。
+        等待输入时 await 挂起（不占用事件循环），返回用户输入内容。'''
+        async with self._io_lock:
+            print(text)
+            return await asyncio.to_thread(input, "你: ")
+
+    # ========================================================================
+
+
     async def submit(self,func_name:str,**kwargs):
         '''外部启动单个功能入口,返回一个Message，若为慢任务则返回一个id，若为快任务则返回结果'''
         if func_name in self.slow_tasks:
@@ -131,6 +150,28 @@ class Bus():
 
         result = await self._ans_executer(func_name=func_name,**kwargs)
         return result
+
+    async def submit_coro(self, coro):
+        '''提交任意协程（如 Agent 的 run_agent）作为慢任务：
+        挂到 pending/task_results，后台执行，完成后结果写入 task_results。
+        返回 Submitted 消息（含 task_id），供后续 poll 回收结果。'''
+        self.task_counter += 1
+        id = self.task_counter
+        self.task_results[id] = NEF
+        asyncio.create_task(self._run_coro(id=id, coro=coro))
+        return Message(title='Submitted', content={'id': id})
+
+    async def _run_coro(self, id: int, coro):
+        '''后台执行任意协程慢任务，完成后把返回值写入 task_results'''
+        try:
+            result = await coro
+            self.task_results[id] = Message(title='Done', content=result)
+        except Exception as e:
+            self.task_results[id] = Message(
+                **{'title': 'Error', 'content': {'error': str(e), 'error_type': type(e).__name__}}
+            )
+            self._exception_submit({f"coro_{id}": str(e)})
+        return None
 
     def poll(self,id : int): 
         result = self.task_results.get(id,NEF)

@@ -100,10 +100,10 @@ def check_tikz(code: Annotated[str, "待验证的 TikZ 绘图代码（仅 tikzpi
 #     return [s for s in schema if s["function"]["name"] in names]
 
 
-def build_super_tools(bus: Bus, client, output_lock: asyncio.Lock) -> Tools:
-    '''把每个专家注册为 bus.tools 上的工具函数，Super 通过调用这些工具来路由专家。
-    专家内部：独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools，
-    输出使用 output_lock 互斥控制台。'''
+def build_super_tools(bus: Bus, client) -> Tools:
+    '''把每个专家注册为 bus.tools 上的工具函数（标记为 slow_task），
+    Super 调用专家时走异步慢任务机制（挂 pending、占用 IO 锁、等输入时挂起）。
+    专家内部：独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools。'''
     super_tools = bus.tools
 
     for name, (prompt, tool_names) in EXPERTS.items():
@@ -119,16 +119,17 @@ def build_super_tools(bus: Bus, client, output_lock: asyncio.Lock) -> Tools:
             ]
             # 每个专家独立 Agent 实例（独立 pending / 独立对话历史）
             expert_agent = Agent(bus)
-            # 控制台互斥：占住锁 → 输出 + 等待，结束后释放
-            async with output_lock:
-                out = await expert_agent.run_agent(client, msgs, MODEL)
-                if out:
-                    print(f"[{_name}] {out}")
+            # 输出通过 bus.io_print 互斥；专家 run_agent 内部 LLM 调工具也走 bus.submit
+            out = await expert_agent.run_agent(client, msgs, MODEL)
+            if out:
+                await bus.io_print(f"[{_name}] {out}")
             return out if out else ""
 
         expert.__name__ = f"{name}_expert"
         expert.__doc__ = f"调用 {name} 专家处理任务，传入具体任务描述。"
         super_tools.add_tool(expert, time_out=180)
+        # 关键：把专家工具标记为慢任务，Super 调用时走异步慢任务机制
+        bus.mark_slow([f"{name}_expert"])
 
     return super_tools
 
@@ -149,12 +150,11 @@ async def main():
         api_key=os.environ["DSH_OPENAI_KEY"], base_url=BASE_URL, timeout=60.0
     )
 
-    # 总线 + 控制台互斥锁
+    # 总线 + 专家工具（专家标记为 slow_task）
     bus = Bus(tools, max_concurrency=4)
-    output_lock = asyncio.Lock()
 
-    # 专家工具注册进 bus.tools（Super 通过调用它们来路由）
-    build_super_tools(bus, client, output_lock)
+    # 专家工具注册进 bus.tools（标记为 slow_task，Super 调用时异步化）
+    build_super_tools(bus, client)
     # Super 也持有记忆工具，用于复盘与上下文传递
     tools.add_tool(data["agent_memory"].add_memory)
     tools.add_tool(data["agent_memory"].retrieve_context)
@@ -163,19 +163,18 @@ async def main():
     super_agent = Agent(bus)
     messages = [{"role": "system", "content": SUPER_PROMPT}]
 
-    print("===== Super 多Agent系统启动（输入 \\exit() 退出）=====")
+    await bus.io_print("===== Super 多Agent系统启动（输入 \\exit() 退出）=====")
     while True:
-        async with output_lock:
-            requiry = await asyncio.to_thread(input, "你: ")
+        # 带 input 的对话回合：输出提示 + 等输入，同刻只有一个对话回合
+        requiry = await bus.io_dialog("你: ")
         if requiry == "\\exit()":
-            print("退出。")
+            await bus.io_print("退出。")
             return
 
         messages.append({"role": "user", "content": requiry})
-        async with output_lock:
-            out = await super_agent.run_agent(client, messages, MODEL)
+        out = await super_agent.run_agent(client, messages, MODEL)
         if out:
-            print(f"[Super] {out}")
+            await bus.io_print(f"[Super] {out}")
 
 
 if __name__ == "__main__":
