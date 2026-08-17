@@ -1,15 +1,31 @@
 # single_agent_trail
 an trail for single agent
 
+问题：
+tool_call_id是独一无二的吗？他的生成机制是什么？
+
 这是一个个人使用的LaTeX编写与数学物理讨论一体化Agent，同时工程代码与理论代码有所不同，它不侧重于抽象问题在不断扩充，而是着眼于解决问题
 高消耗/CPU 密集/阻塞函数 → 注册为同步函数（走 to_thread）；只有 IO 等待型函数 → 才写成协程。
 
-所有函数必须返回dict以统一调度
-返回格式:
+通过bus的返回格式：None或者
+返回格式: 一个 Message 对象
 {
-    'Title' : str
-    'content' : dict : 具体内容，返回的参数
+    'title' : str = 'Done' , 'Submitted' , 'Error'
+    'content' : dict : 
+    {
+        若没有故障，为被调用函数的返回结果，视具体函数而定
+        'id' : int 调动序列的编号
+        'error' : str 错误内容
+        'error_type' : str 错误类型
+        'Task' : str 任务名
+        'args' : dict 参数列
+    }
 }
+
+所有功能函数以dict方式返回信息
+
+如果一个进程希望调度一个自己不能调度的函数，需要向Super发送一个提醒，该怎么办？
+    走emit? 然后让专家之间相互订阅，在有必要的时候通过emit唤醒所有专家
 
 目标：
 准备实现的内容：

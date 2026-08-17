@@ -5,7 +5,6 @@ from typing import Annotated,get_origin,get_args,Any,Pattern,Callable
 from annotated_types import Gt,Le,Ge,Lt,MaxLen,MinLen,MultipleOf
 from pydantic_core import PydanticUndefined
 from functools import wraps
-from enum import Enum
 import asyncio
 
 class SPECIAL_ERROR:
@@ -191,6 +190,7 @@ class Tools:
             raise ValueError(f"Function {func_name} not found in tool list.")
 
     async def async_execute(self,func_name:str,*args,**kwargs):
+        '''直接返回功能函数原始结果'''
         if func_name in self.tool_list:
             if inspect.iscoroutinefunction(self.tool_list[func_name]):
                 try :
