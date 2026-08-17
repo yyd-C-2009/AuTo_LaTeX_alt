@@ -1,8 +1,14 @@
 # single_agent_trail
 an trail for single agent
 
-问题：
+问题（已解决）：
 tool_call_id是独一无二的吗？他的生成机制是什么？
+    答：tool_call_id 是「OpenAI 兼容 API 服务端」为每个工具调用生成的字符串标识（形如 call_xxx），
+    由服务端生成、客户端不可指定。它保证「同一段对话(messages)历史内唯一」，用于把 role:tool
+    消息关联回对应的 tool_call。因此可作为 pending 表的 key（tool_call_id -> task_id），
+    但只能用于「同一对话会话内」跟踪，不能跨对话/跨请求假定唯一。
+    注意：LLM 每发起一次 tool_call，都必须回填一个带相同 tool_call_id 的 role:tool 消息，
+    否则服务端会报错（tool_call_id 缺少对应 tool 消息）。
 
 这是一个个人使用的LaTeX编写与数学物理讨论一体化Agent，同时工程代码与理论代码有所不同，它不侧重于抽象问题在不断扩充，而是着眼于解决问题
 高消耗/CPU 密集/阻塞函数 → 注册为同步函数（走 to_thread）；只有 IO 等待型函数 → 才写成协程。
@@ -55,6 +61,13 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     使用Tools对工具进行注册
     一个未全面竣工的本地保存数据库
 
+OCR 改动：
+    - recognize_doc / recognize_image 由 async 改为同步阻塞函数（不再内部 to_thread），
+      统一交由 Tools.async_execute 的 to_thread 分支调度到线程池，结构更简单。
+    - 新增缓存：OCR 结果存为 JSON 于 OCR_result/ 目录，长期存储。
+      PDF 按「页」缓存（文件名 + 内容 md5 + 页码），单张图片按「文件」缓存；
+      每次 OCR 前检查缓存，命中直接跳过 OCR（内容变更自动失效重识别）。
+
 
 程序结构：
     Agent cyc waiting for message
@@ -67,3 +80,24 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     消息总线上挂载的executer负责将msg解包为args并通过对应的tool.executer执行
 
     这里有一个问题：executer执行之后，对方不知道自己因该在哪里播报自己的结果，但是这不是问题，我们把一个约定的字段设为recall来表示回拨路径
+
+待办（TODO，高级特性，已注释暂缓开放）：
+    - immediate_start_ans：让 Agent 选择「立即开始回答，不等待后续工具结果」（Agent.py 已注释）
+    - pending_release：让 Agent 放弃所有在途慢任务（Agent.py 已注释）
+    - _released_tasks：配合 pending_release 的「已放弃任务集合」（event_bus.py 已注释）
+    - 兜底策略：慢任务在 max_step 内未完成时，如何避免结果丢失（方案：慢任务硬超时 + 「等待不烧 step」）
+    - recall 回拨字段的实际接线：让「异步回调」模式落地（目前 Message.reply 字段已预留，未接线）
+    - 不可中断重任务的优雅停止：to_thread 无法 cancel 阻塞线程，考虑独立线程池 / 进程池（ProcessPoolExecutor）
+
+多智能体架构（进行中）：
+    - 专家不常驻：各专家均接入智能体，由智能体自己判断「是否完成工作、可以停止」；
+      过渡期先由人给指令停止，不单独做「常驻线程 + 挂起」模型。
+    - Super 也是专家，但只负责路由，不负责具体读写。
+    - 所有 Agent 共用同一份 Tools（挂在 bus 上）；「不同 Agent 不同工具」由之后单独的鉴权系统实现。
+    - 专家间通过总线 emit/subscribe 相互唤醒（松耦合）。
+    - 控制台输出互斥：多智能体共享控制台，A 输出时 B 必须等待——等 A 输出完成并得到回复后，
+      B 才能输出并等待回复（即 stdout/input 交互通道为互斥资源）。
+    - 暂缓：Super 自主设计工作流程（Plan）、指定位置修改的 tool。
+
+专家分区（待实现，之后再做）：
+    - 每个专家独立线程/协程，无任务时挂起，有事件被 emit 唤醒（「常驻挂起」模型）。

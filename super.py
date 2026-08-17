@@ -5,7 +5,8 @@ import shutil
 import openai
 from typing import Annotated
 
-from Agent import run_agent, agent
+from Agent import Agent
+from event_bus import Bus
 from Tools import Tools
 from initer import init
 
@@ -93,32 +94,41 @@ def check_tikz(code: Annotated[str, "待验证的 TikZ 绘图代码（仅 tikzpi
     return "编译失败：\n" + "\n".join(log.splitlines()[-15:])
 
 
-def _filter_schema(schema: list, names: list) -> list:
-    return [s for s in schema if s["function"]["name"] in names]
+# TODO: 旧版「不同 Agent 不同工具子集」机制，现改为所有 Agent 共用 bus.tools，
+# 「不同 Agent 不同工具」由之后的鉴权系统实现。先保留注释，待鉴权系统落地后删除。
+# def _filter_schema(schema: list, names: list) -> list:
+#     return [s for s in schema if s["function"]["name"] in names]
 
 
-def build_super_tools(agent_tool: Tools, client) -> Tools:
-    super_tools = Tools()
+def build_super_tools(bus: Bus, client, output_lock: asyncio.Lock) -> Tools:
+    '''把每个专家注册为 bus.tools 上的工具函数，Super 通过调用这些工具来路由专家。
+    专家内部：独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools，
+    输出使用 output_lock 互斥控制台。'''
+    super_tools = bus.tools
 
     for name, (prompt, tool_names) in EXPERTS.items():
         async def expert(
             task: Annotated[str, "交给该专家处理的任务或问题描述"] = "",
             _prompt: str = prompt,
-            _names: list = tool_names,
+            _name: str = name,
+            _names: list = tool_names,   # TODO: 鉴权系统落地后，专家工具子集由此给出
         ) -> str:
             msgs = [
                 {"role": "system", "content": _prompt},
                 {"role": "user", "content": task},
             ]
-            out = await run_agent(
-                agent_tool, client, msgs, MODEL,
-                tools=_filter_schema(agent_tool.schema, _names),
-            )
+            # 每个专家独立 Agent 实例（独立 pending / 独立对话历史）
+            expert_agent = Agent(bus)
+            # 控制台互斥：占住锁 → 输出 + 等待，结束后释放
+            async with output_lock:
+                out = await expert_agent.run_agent(client, msgs, MODEL)
+                if out:
+                    print(f"[{_name}] {out}")
             return out if out else ""
 
         expert.__name__ = f"{name}_expert"
         expert.__doc__ = f"调用 {name} 专家处理任务，传入具体任务描述。"
-        super_tools.add_tool(expert, time_out=120)
+        super_tools.add_tool(expert, time_out=180)
 
     return super_tools
 
@@ -126,23 +136,46 @@ def build_super_tools(agent_tool: Tools, client) -> Tools:
 async def main():
     data = await init()  # 加载 Saver + Visal（重模型，线程池）
 
-    agent_tool = Tools()
-    agent_tool.add_tool(data["agent_memory"].add_memory)
-    agent_tool.add_tool(data["agent_memory"].retrieve_context)
-    agent_tool.add_tool(data["agent_visal"].recognize_doc, time_out=120)
-    agent_tool.add_tool(write_latex, time_out=10)
-    agent_tool.add_tool(check_tikz, time_out=90)
+    # 所有 Agent 共用的 Tools（挂在 bus 上）
+    tools = Tools()
+    tools.add_tool(data["agent_memory"].add_memory)
+    tools.add_tool(data["agent_memory"].retrieve_context)
+    tools.add_tool(data["agent_visal"].recognize_doc, time_out=180)
+    tools.add_tool(write_latex, time_out=10)
+    tools.add_tool(check_tikz, time_out=90)
 
-    client = openai.OpenAI(
+    # 共享 client，注意是AsyncOpenAI
+    client = openai.AsyncOpenAI(
         api_key=os.environ["DSH_OPENAI_KEY"], base_url=BASE_URL, timeout=60.0
     )
 
-    super_tools = build_super_tools(agent_tool, client)
-    # Super 直接持有记忆工具，用于复盘与上下文传递（不直接 OCR，交给 math_expert）
-    super_tools.add_tool(data["agent_memory"].add_memory)
-    super_tools.add_tool(data["agent_memory"].retrieve_context)
+    # 总线 + 控制台互斥锁
+    bus = Bus(tools, max_concurrency=4)
+    output_lock = asyncio.Lock()
 
-    await agent(super_tools, system_prompt=SUPER_PROMPT, model=MODEL, base_url=BASE_URL)
+    # 专家工具注册进 bus.tools（Super 通过调用它们来路由）
+    build_super_tools(bus, client, output_lock)
+    # Super 也持有记忆工具，用于复盘与上下文传递
+    tools.add_tool(data["agent_memory"].add_memory)
+    tools.add_tool(data["agent_memory"].retrieve_context)
+
+    # Super 自己也是一个 Agent（只负责路由，不负责具体读写）
+    super_agent = Agent(bus)
+    messages = [{"role": "system", "content": SUPER_PROMPT}]
+
+    print("===== Super 多Agent系统启动（输入 \\exit() 退出）=====")
+    while True:
+        async with output_lock:
+            requiry = await asyncio.to_thread(input, "你: ")
+        if requiry == "\\exit()":
+            print("退出。")
+            return
+
+        messages.append({"role": "user", "content": requiry})
+        async with output_lock:
+            out = await super_agent.run_agent(client, messages, MODEL)
+        if out:
+            print(f"[Super] {out}")
 
 
 if __name__ == "__main__":
