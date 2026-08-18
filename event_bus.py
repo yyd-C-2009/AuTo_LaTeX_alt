@@ -85,6 +85,11 @@ class Bus():
         self.reentrant_tasks.update(tasks)
         return None
 
+    def mark_reentrant(self,tasks:list[str] = []):
+        '''标记「内部还会再调用 submit」的慢任务（如专家）：执行时不占用并发名额，避免「持锁等锁」死锁'''
+        self.reentrant_tasks.update(tasks)
+        return None
+
     def emit(self,event_name:str,content:dict = None):                  #事件添加
         '''广播一个事件，除非实现函数内有约定，不会返回具体值'''
         self.registry(event_name=event_name)
@@ -199,6 +204,10 @@ class Bus():
         return None
 
     def poll(self,id : int): 
+        '''查询慢任务结果：处理中→Submitted；完成→原结果并销毁；未知/已取走→Error（避免误导性重查）'''
+        self._gc_task_results()
+        if id not in self.task_results:
+            return Message(**{'title':'Error','content':{'error':f'task_id {id} 不存在（从未提交、结果已被取走或已过期）','error_type':'UnknownTaskId'}})
         result = self.task_results.get(id,NEF)
         if result is NEF:
             return Message(title='Submitted',content={'id' : id})
@@ -234,12 +243,14 @@ class Bus():
     async def _ans_executer(self,func_name:str,**kwargs):
         '''
         执行函数功能的工具，回传Message（异常直接返回 Error 消息，不在外面再包 Done）
+        执行函数功能的工具，回传Message（异常直接返回 Error 消息，不在外面再包 Done）
         '''
             # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
         async with self.semaphore:
             try:
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)
             except Exception as e:
+                result = Message(**{'title':'Error','content':{'Task': func_name,'args':kwargs,'error':str(e),'error_type':type(e).__name__}})        # 已是 Message(Error)，下方原样返回
                 result = Message(**{'title':'Error','content':{'Task': func_name,'args':kwargs,'error':str(e),'error_type':type(e).__name__}})        # 已是 Message(Error)，下方原样返回
                 self._exception_submit({func_name:str(e)})
         if isinstance(result, Message):
@@ -261,7 +272,10 @@ class Bus():
     async def _run_slow(self, id: int, func_name:str,**kwargs):
         '''慢任务执行器，不回传，执行完毕后将结果写入task_results'''
         try:
-            async with self.semaphore:
+            if func_name not in self.reentrant_tasks:
+                async with self.semaphore:
+                    result = await self.tools.async_execute(func_name=func_name,**kwargs)
+            else:                                # 可重入任务（如专家）：执行不占 semaphore 名额，避免「持锁等锁」死锁
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)
             self.task_results[id] = Message(title='Done',content=result)
         except Exception as e:
