@@ -5,7 +5,7 @@ import shutil
 import openai
 from typing import Annotated
 
-from Agent import Agent
+from Agent import Agent, view_delayed_results
 from event_bus import Bus
 from Tools import Tools
 from initer import init
@@ -20,8 +20,12 @@ SUPER_PROMPT = (
     "你是Super，一个多Agent系统的调度者。你接收用户请求，理解其意图，"
     "选择并调用合适的专家Agent（通过工具），汇总结果。每次对话结束时复盘："
     "判断哪些功能值得在之后被集成为新工具，并调用 add_memory 保存这份复盘。"
+    "同时，诊断当前对于各个专家的提示词是否合理，是否需要调整。"
     "可用专家：math_expert(数学判断/讨论)、mathwrite_expert(LaTeX转写)、"
     "passagewrite_expert(篇章结构与总结)、draw_expert(Tikz绘图)。"
+    "注意：各专家每次被调用都是无状态的，不会记住你之前的对话或它们之前的回答；"
+    "因此调用专家时，必须一次性把完成任务所需的全部上下文写进 task 参数。"
+    "某个专家任务提交后系统会耐心等待其完成，请勿在上一轮尚无结果时重复提交等价任务。"
 )
 
 # name -> (系统提示词, 允许使用的工具名列表)
@@ -101,7 +105,7 @@ def check_tikz(code: Annotated[str, "待验证的 TikZ 绘图代码（仅 tikzpi
     try:
         proc = subprocess.run(
             [exe, "-interaction=nonstopmode", "-halt-on-error", name + ".tex"],
-            cwd=TIKZ_DIR, capture_output=True, text=True, timeout=60,
+            cwd=TIKZ_DIR, capture_output=True, text=True, timeout=60, encoding="utf-8"
         )
     except subprocess.TimeoutExpired:
         return "编译超时(>60s)"
@@ -174,6 +178,7 @@ async def main():
     tools.add_tool(write_latex, time_out=10)
     tools.add_tool(check_tikz, time_out=90)
     tools.add_tool(str_replace_editor, time_out=10)
+    tools.add_tool(view_delayed_results, time_out=5)
 
     # 共享 client，注意是AsyncOpenAI
     client = openai.AsyncOpenAI(

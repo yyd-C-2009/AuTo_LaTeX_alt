@@ -176,3 +176,12 @@ OCR 改动：
     19.【低】✅已处理：Bus.io_dialog 曾重复输出提示——内部既 print(text) 又 input("你: ")，
        导致调用 bus.io_dialog("你: ") 时屏幕出现两个「你: 」。已把 input 的内置提示符去掉，
        提示只由 print(text) 输出一次（提示文本由调用方传入）。
+    20.【高】✅已处理（延迟结果窗口，根治 400 与重复提交）：
+       根因：慢任务提交后先回填「占位 tool」消息（assistant->tool 配对），完成时又回填第二条同 tool_call_id 的
+       tool 消息，违反 OpenAI「一条 role:tool 只能对应前面一条 assistant tool_calls」的规则 → 报 400
+       (Messages with role 'tool' must be a response to a preceding message with 'tool_calls')，并诱发重复提交。
+       方案：慢任务完成后不再往 messages 回填第二条 tool，而是把结果（含 function 函数名、query 提问内容、
+       result 结果）存入每个 Agent 独立的 self.delayed_results 缓存；新增全局工具 view_delayed_results，
+       LLM 主动调用时被 Agent.run_agent 拦截（不经 bus.submit/鉴权），强制注入当前 Agent 的缓存并返回，读后清空。
+       慢任务等待改由 _wait_pending 轮询 poll，不消耗 max_step（避免 Super 提前放弃 Timeout）。
+       （验证：python test_delayed_results_demo.py）

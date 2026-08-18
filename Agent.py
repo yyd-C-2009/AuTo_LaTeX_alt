@@ -25,10 +25,21 @@ def tool_call_add(message:list,content:str,tool_call_id:str):
     })
     return None
 
+
+def view_delayed_results(
+    delayed_results: Annotated[list | None, "你当前 Agent 的延迟结果缓存列表，请勿填写此字段，系统会自动注入"] = None
+) -> list:
+    '''查看之前提交的慢任务（延迟调用）已经返回的结果。内部参数无需填写，系统会自动注入你当前的缓存；每次读取后缓存会被清空。'''
+    if delayed_results is None:
+        return []
+    return delayed_results
+
+
 class Agent:
     def __init__(self, bus:Bus):
         self.bus = bus
-        self.pending = {}            # tool_call_id -> task_id（跨轮在途慢任务表）
+        self.pending = {}            # tool_call_id -> {task_id, func_name, query}
+        self.delayed_results = []   # 慢任务 poll 结果缓存（供 view_delayed_results 读取）
 
     # TODO: 高级特性——后续再开放，暂注释
     # def immediate_start_ans(self,
@@ -64,17 +75,23 @@ class Agent:
         # 否则只允许提交白名单内的工具（schema 级过滤只是「让专家看不见」，这里才是「调不动」）
         allow = set(tool_names) if tool_names is not None else None
         if allow is not None:
-            schema = [s for s in schema if s['function']['name'] in allow]
+            # view_delayed_results 始终开放：每个 Agent 都能查看「自己的」延迟结果缓存
+            schema = [s for s in schema if s['function']['name'] in allow or s['function']['name'] == 'view_delayed_results']
         while steps < max_step:
             print(f'TASKKKS{steps}')
             steps += 1
 
             # ① 先 poll 在途慢任务：完成的回填结果并移出 pending
             finished = []
-            for tcid, tid in self.pending.items():
-                result = self.bus.poll(tid)
+            for tcid, info in list(self.pending.items()):
+                result = self.bus.poll(info['task_id'])
                 if result.title in ('Done', 'Error'):
-                    tool_call_add(messages, str(result.content), tcid)
+                    # 不回填 tool，存入延迟结果缓存，由 view_delayed_results 统一读取
+                    self.delayed_results.append({
+                        'function': info['func_name'],
+                        'query': info['query'],
+                        'result': str(result.content),
+                    })
                     finished.append(tcid)
             for tcid in finished:
                 self.pending.pop(tcid, None)
@@ -107,6 +124,14 @@ class Agent:
                         continue
                     print(f"LLM决定调用{func_name}，参数为{kwargs}")
 
+                    # 特殊拦截：view_delayed_results 读取「自己」的延迟缓存，不经 bus.submit / 鉴权
+                    if func_name == 'view_delayed_results':
+                        cached = self.delayed_results
+                        tool_call_add(messages, str(cached), tool_called.id)
+                        self.delayed_results = []   # 读后清空
+                        print(f"[延迟结果窗口] 返回 {len(cached)} 条延迟结果")
+                        continue
+
                     # 执行层鉴权：白名单外的工具一律拒绝执行（防止专家自我调用/互相甩锅）
                     if allow is not None and func_name not in allow:
                         tool_call_add(
@@ -122,27 +147,61 @@ class Agent:
                     if result.title in ('Done', 'Error'):
                         tool_call_add(messages, str(result.content), tool_called.id)
                     elif result.title == 'Submitted':
-                        self.pending[tool_called.id] = result.content['id']
-                        # 慢任务也必须回填占位 tool 消息，否则 API 会因缺少对应 tool_call_id 报错
+                        self.pending[tool_called.id] = {
+                            'task_id': result.content['id'],
+                            'func_name': func_name,
+                            'query': kwargs,  # question content sent by LLM
+                        }
+                        # 慢任务也必须回填占位 tool 消息（assistant->tool 配对），否则 API 报 400
                         tool_call_add(
                             messages,
-                            f"任务已提交(task_id={result.content['id']})，处理中，稍后自动获取结果",
+                            f"任务已提交(task_id={result.content['id']})，处理中；结果就绪后请调用 view_delayed_results 查看",
                             tool_called.id,
                         )
 
                 # 若有在途慢任务，短暂等待后进入下一轮再 poll；否则继续
                 if self.pending:
-                    await asyncio.sleep(10)
+                    await self._wait_pending(messages)
                 continue
 
             # ④ 无工具调用：若还有在途慢任务未完成，等待后再试；否则返回内容
             if self.pending:
-                await asyncio.sleep(10)
+                await self._wait_pending(messages)
                 continue
             return msg.content
 
         print("Timeout as agent be stuck in tools calling")   # 超过 max_step 判定死循环
         return None
+    async def _wait_pending(self, messages: list, poll_interval: float = 2.0, hard_timeout: float = 240.0):
+        '''等待所有在途慢任务完成：只轮询 poll、不消耗 run_agent 的 step 计数，
+        避免「等待慢任务」白烧 max_step 导致 Super 提前放弃（Timeout）。
+        慢任务完成即把结果（含函数名+提问内容）存入 self.delayed_results 缓存，
+        不再往 messages 重复回填 role:tool（避免重复 tool_call_id 导致 400）；
+        LLM 通过调用 view_delayed_results 主动读取缓存。超过 hard_timeout 仍完成则跳出兜底。'''
+        waited = 0.0
+        while self.pending:
+            await asyncio.sleep(poll_interval)
+            waited += poll_interval
+            finished = []
+            for tcid, info in list(self.pending.items()):
+                result = self.bus.poll(info['task_id'])
+                if result.title in ('Done', 'Error'):
+                    # 不再往 messages 重复追加 role:tool（会重复使用 tool_call_id 导致 400），
+                    # 改为存入 Agent 自己的延迟结果缓存，供 view_delayed_results 读取
+                    self.delayed_results.append({
+                        'function': info['func_name'],
+                        'query': info['query'],
+                        'result': str(result.content),
+                    })
+                    finished.append(tcid)
+            for tcid in finished:
+                self.pending.pop(tcid, None)
+            if waited >= hard_timeout:
+                print(f"[慢任务等待硬超时] 仍有 {len(self.pending)} 个任务未完成，先返回让 LLM 处理")
+                break
+        return None
+
+
 
     async def agent(self, max_step: int = 5,
                     system_prompt: str = (
