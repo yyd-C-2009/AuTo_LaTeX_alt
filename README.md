@@ -114,3 +114,45 @@ OCR 改动：
     - 下一步关键动作：把 expert 放入 slow_task 运行（通过 bus.submit 挂到 pending，
       使其占用 IO 锁、等待输入时挂起，完成后从 pending 移除）。
     - 注意：当前工具式子 Agent（被动被 Super 路由调用）已够用，暂不做「常驻挂起」主动模型。
+
+ 当前未实现功能（登记，做了就划掉，新发现的及时补进来）：
+     - 联网功能（目标栏已列，尚未实现）
+     - Listener 音频听写：音频 API 监听、课堂内容记录（未实现）
+     - 流式 IO 支持（未实现）
+     - Super 自主 Plan（有向图流程设计）、指定位置修改的 tool（暂缓）
+     - 鉴权系统：当前所有 Agent 共享 bus.tools 全量 schema，EXPERTS 中的工具子集实际未生效
+     - 常驻挂起专家模型：Agent_core.agent_exec 仅占位，bus.receive 未实现；
+       专家目前只能被 Super 以「慢任务工具」形式被动调用
+     - Message.reply 回拨字段接线；emit/subscribe 的 deliver 循环当前未在任何入口启动（死代码）
+     - 慢任务兜底：max_step 内未完成的任务结果会丢失（慢任务硬超时、「等待不烧 step」均未实现）
+     - 对话复盘自动固化为 Tool 的流程（目前仅提示词约定 + add_memory）
+     - 消息历史 token 截断 message_cutter（Agent.py 已注释，函数本体已不存在）
+     - tmp.py 的 recognize_doc 重构（资源管理/页标题/去重/5页硬截断）未并入正式 Visal.py
+     - PassageWrite「总结对话」缺数据通路：专家每次新建 messages，拿不到 Super 的对话历史
+     - terminal.py 已损坏，待修复或删除（见隐患 5）
+
+ 已知隐患（登记，修复后划掉）：
+     1.【高】super.py main() 中 add_memory / retrieve_context 被 add_tool 两次（约 142-143 与 159-160 行），
+       schema 出现同名工具两份。
+     2.【高】专家工具互相可见、可递归调用；专家慢任务持有 bus.semaphore 名额，其内部工具调用再竞争
+       同一把锁：并行专家数 ≥ max_concurrency(4) 时死锁。
+     3.【高】event_bus._ans_executer 双层包装：异常先包成 Message(Error)，外层又包 Message('Done', ...)，
+       快任务错误永远显示 Done，Agent 无法区分 Done/Error。
+     4.【高】Agent.run_agent 中 json.loads(tool_call.arguments) 无保护，LLM 返回非法 JSON 直接崩溃。
+     5.【高】terminal.py 已坏：from Agent import agent（已不存在）；Tools.registry 装饰器内
+       def decorater(func: function) 的 function 未定义 → NameError，import 即崩。
+     6.【高】慢任务超限结果丢失，且残留 pending 带入下一轮对话。
+     7.【中】recognize_doc 未强制 ≤5 页上限（仅 docstring 声称），LLM 传大页码列表可耗尽资源。
+     8.【中】Saver.add_memory 注释声称重复 ID 自动覆盖，ChromaDB 重复 add 实际可能报
+       DuplicateIDError（应改 upsert），未验证。
+     9.【中】task_results 中 Submitted 后无人 poll 的任务永久残留（内存泄漏）；poll 取走即销毁，
+       二次 poll 返回误导性 Submitted。
+    10.【中】CLAUDE.md 称 PDF 页并发 OCR，实际串行；Pix2Text 单实例经 to_thread 多线程调用的
+       线程安全性未验证。
+    11.【低】Super 对话历史无截断，长对话有爆 token 风险。
+    12.【低】OCR 结果的 Success 是字符串 'True'/'False' 非 bool；'inline formular' 拼写错误
+       已成接口约定（缓存文件/测试均依赖），改名需同步迁移旧缓存。
+    13.【低】Agent.py 调试残留 print(TASKKKS...)；慢任务等待固定 sleep(10) 且烧 step。
+    14.【低】super.py 直接读 os.environ["DSH_OPENAI_KEY"]，缺失时 KeyError 无友好提示。
+    15.【低】硬编码：Saver 嵌入模型绝对路径、base_url、模型名（换机器必须改）。
+    16.【低】trail.py 是错误用法的忙循环实验代码（to_thread 传协程 + 无 await），运行即占满 CPU，勿运行。

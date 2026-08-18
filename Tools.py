@@ -164,7 +164,7 @@ class Tools:
 
     def registry(self,time_out:float = 5.0):
 
-        def decorater(func : function):
+        def decorater(func : Callable):
         
             @wraps(func)
             def wrapper(*args,**kwargs):

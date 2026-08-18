@@ -155,9 +155,8 @@ async def main():
 
     # 专家工具注册进 bus.tools（标记为 slow_task，Super 调用时异步化）
     build_super_tools(bus, client)
-    # Super 也持有记忆工具，用于复盘与上下文传递
-    tools.add_tool(data["agent_memory"].add_memory)
-    tools.add_tool(data["agent_memory"].retrieve_context)
+    # 记忆工具已在上方注册（见 tools.add_tool(add_memory/retrieve_context)），Super 复盘直接使用；
+    # 切勿重复 add_tool：同名工具会重复出现在 schema 中（历史 bug，已修复）
 
     # Super 自己也是一个 Agent（只负责路由，不负责具体读写）
     super_agent = Agent(bus)

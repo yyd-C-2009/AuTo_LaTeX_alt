@@ -47,6 +47,7 @@ class Bus():
         self.task_results = {}                    # task_id -> 结果（None=处理中）
         self.task_counter = 0                     # 自增 id 生成器
         self.slow_tasks = set()                   # 走 submit 的慢任务名集合
+        self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
         # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
         self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
@@ -73,6 +74,11 @@ class Bus():
 
     def mark_slow(self,tasks:list[str] = []):
         self.slow_tasks.update(tasks)
+        return None
+
+    def mark_reentrant(self,tasks:list[str] = []):
+        '''标记「内部还会再调用 submit」的慢任务（如专家）：执行时不占用并发名额，避免「持锁等锁」死锁'''
+        self.reentrant_tasks.update(tasks)
         return None
 
     def emit(self,event_name:str,content:dict = None):                  #事件添加
@@ -174,6 +180,9 @@ class Bus():
         return None
 
     def poll(self,id : int): 
+        '''查询慢任务结果：处理中→Submitted；完成→原结果并销毁；未知/已取走→Error（避免误导性重查）'''
+        if id not in self.task_results:
+            return Message(**{'title':'Error','content':{'error':f'task_id {id} 不存在（从未提交或结果已被取走）','error_type':'UnknownTaskId'}})
         result = self.task_results.get(id,NEF)
         if result is NEF:
             return Message(title='Submitted',content={'id' : id})
@@ -207,14 +216,14 @@ class Bus():
 
     async def _ans_executer(self,func_name:str,**kwargs):
         '''
-        执行函数功能的工具，回传Message，Tools中的总线回传尚未完成，注意本函数返回Message
+        执行函数功能的工具，回传Message（异常直接返回 Error 消息，不在外面再包 Done）
         '''
             # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
         async with self.semaphore:
             try:
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)
             except Exception as e:
-                result = Message(**{'title':'Error','content':{'Task': func_name,'args':kwargs,'error':str(e),'error_type':type(e).__name__}})
+                result = Message(**{'title':'Error','content':{'Task': func_name,'args':kwargs,'error':str(e),'error_type':type(e).__name__}})        # 已是 Message(Error)，下方原样返回
                 self._exception_submit({func_name:str(e)})
         return Message(title='Done',content=result)
 
@@ -233,6 +242,9 @@ class Bus():
     async def _run_slow(self, id: int, func_name:str,**kwargs):
         '''慢任务执行器，不回传，执行完毕后将结果写入task_results'''
         try:
+            if func_name not in self.reentrant_tasks:
+                async with self.semaphore:
+                    result = await self.tools.async_execute(func_name=func_name,**kwargs)
             async with self.semaphore:
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)
                 self.task_results[id] = Message(title='Done',content=result)
