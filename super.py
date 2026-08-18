@@ -9,9 +9,10 @@ from Agent import Agent
 from event_bus import Bus
 from Tools import Tools
 from initer import init
+from str_replace_editor import str_replace_editor
 
-MODEL = "deepseek-v4-flash-ascend"
-BASE_URL = "https://api.llm.ustc.edu.cn/v1/"
+MODEL = "deepseek-v4-flash"
+BASE_URL = "https://api.deepseek.com"
 OUT_DIR = "latex_output"
 TIKZ_DIR = "tikz_output"
 
@@ -33,14 +34,14 @@ EXPERTS = {
     "mathwrite": (
         "你是MathWrite专家：将他人的输出转写为正确的LaTeX代码。"
         "书写定理、引理、定义、证明时必须按规范填写，并确保LaTeX代码正确。"
-        "完成后调用 write_latex 将代码写入文件。",
-        ["write_latex"],
+        "新建代码用 write_latex 写入文件；修改已有 .tex 文件请用 str_replace_editor 精修。",
+        ["write_latex", "str_replace_editor"],
     ),
     "passagewrite": (
         "你是PassageWrite专家：设计篇章结构，管理MathWrite的编写位置，"
         "将Super/Math与用户的对话总结（非摘录）成重点突出的LaTeX文档，"
-        "完成后调用 write_latex 写入文件。",
-        ["write_latex", "retrieve_context"],
+        "新建用 write_latex 写入；调整篇章结构/位置可用 str_replace_editor 精修已有文件。",
+        ["write_latex", "str_replace_editor", "retrieve_context"],
     ),
     "draw": (
         "你是Draw专家：负责Tikz绘图。你只能输出 LaTeX 字符串作为最终回答"
@@ -50,6 +51,22 @@ EXPERTS = {
         ["check_tikz"],
     ),
 }
+
+
+def _dialogue_context(messages: list, limit: int = 50) -> str:
+    '''提取 messages 中「用户 ↔ Super/专家」的纯文本对话，过滤 role:tool 与工具调用过程，
+    格式化成可读的对话记录（仅保留最近 limit 条），作为专家的上下文注入。'''
+    lines = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        # 只保留 user / assistant 的非空纯文本内容（assistant 的 tool_calls 轮 content 常为 None）
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            who = "用户" if role == "user" else "Super"
+            lines.append(f"{who}: {content.strip()}")
+    return "\n".join(lines[-limit:]) if lines else ""
 
 
 def write_latex(content: Annotated[str, "要写入的LaTeX内容"], filename: Annotated[str, "文件名(可省略)"] = "output.tex") -> str:
@@ -99,10 +116,12 @@ def check_tikz(code: Annotated[str, "待验证的 TikZ 绘图代码（仅 tikzpi
 # Super 调用 run_agent 时 tool_names=None，保留全量调度权。
 
 
-def build_super_tools(bus: Bus, client) -> Tools:
+def build_super_tools(bus: Bus, client, conversation_history: list) -> Tools:
     '''把每个专家注册为 bus.tools 上的工具函数（标记为 slow_task），
     Super 调用专家时走异步慢任务机制（挂 pending、占用 IO 锁、等输入时挂起）。
-    专家内部：独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools。'''
+    专家内部：独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools。
+    conversation_history：Super 的 messages 列表引用，专家被调用时提取其中的
+    「用户 ↔ Super 纯文本对话」作为上下文注入，打通 PassageWrite 总结对话的数据通路。'''
     super_tools = bus.tools
 
     for name, (prompt, tool_names) in EXPERTS.items():
@@ -112,9 +131,18 @@ def build_super_tools(bus: Bus, client) -> Tools:
             _name: str = name,
             _names: list = tool_names,   # 专家工具子集（下划线参数不进 schema，LLM 无法篡改）
         ) -> str:
+            # 提取 Super 与用户的纯文本对话历史，注入为上下文（PassageWrite 总结对话依赖它）
+            history = _dialogue_context(conversation_history)
+            user_content = task
+            if history:
+                user_content = (
+                    "以下是 Super 与用户的对话历史（作为背景参考；若任务要求总结对话，须据此为准，且不要逐字复述）：\n"
+                    f"{history}\n\n"
+                    f"【当前任务】{task}"
+                )
             msgs = [
                 {"role": "system", "content": _prompt},
-                {"role": "user", "content": task},
+                {"role": "user", "content": user_content},
             ]
             # 每个专家独立 Agent 实例（独立 pending / 独立对话历史）
             expert_agent = Agent(bus)
@@ -145,23 +173,25 @@ async def main():
     tools.add_tool(data["agent_visal"].recognize_doc, time_out=180)
     tools.add_tool(write_latex, time_out=10)
     tools.add_tool(check_tikz, time_out=90)
+    tools.add_tool(str_replace_editor, time_out=10)
 
     # 共享 client，注意是AsyncOpenAI
     client = openai.AsyncOpenAI(
-        api_key=os.environ["DSH_OPENAI_KEY"], base_url=BASE_URL, timeout=60.0
+        api_key=os.environ["DS_API_KEY"], base_url=BASE_URL, timeout=60.0
     )
 
     # 总线 + 专家工具（专家标记为 slow_task）
     bus = Bus(tools, max_concurrency=4)
 
-    # 专家工具注册进 bus.tools（标记为 slow_task，Super 调用时异步化）
-    build_super_tools(bus, client)
-    # 记忆工具已在上方注册（见 tools.add_tool(add_memory/retrieve_context)），Super 复盘直接使用；
-    # 切勿重复 add_tool：同名工具会重复出现在 schema 中（历史 bug，已修复）
-
     # Super 自己也是一个 Agent（只负责路由，不负责具体读写）
     super_agent = Agent(bus)
     messages = [{"role": "system", "content": SUPER_PROMPT}]
+
+    # 专家工具注册进 bus.tools（标记为 slow_task，Super 调用时异步化）；
+    # 传入 messages 引用，让专家被调用时能读到「用户 ↔ Super」对话历史（PassageWrite 总结对话的数据通路）
+    build_super_tools(bus, client, messages)
+    # 记忆工具已在上方注册（见 tools.add_tool(add_memory/retrieve_context)），Super 复盘直接使用；
+    # 切勿重复 add_tool：同名工具会重复出现在 schema 中（历史 bug，已修复）
 
     await bus.io_print("===== Super 多Agent系统启动（输入 \\exit() 退出）=====")
     while True:

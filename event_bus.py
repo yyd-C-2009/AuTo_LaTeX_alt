@@ -51,7 +51,6 @@ class Bus():
         self._task_ttl = 600.0                    # 已完成结果保留秒数，超时自动清理（防内存泄漏）
         self.slow_tasks = set()                   # 走 submit 的慢任务名集合
         self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
-        self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
         # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
         self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
@@ -146,10 +145,11 @@ class Bus():
 
     async def io_dialog(self, text: str = "") -> str:
         '''带 input 的对话回合：把「一次输出 + 下一次输入」作为完整过程锁定。
-        等待输入时 await 挂起（不占用事件循环），返回用户输入内容。'''
+        等待输入时 await 挂起（不占用事件循环），返回用户输入内容。
+        提示文本只由 print(text) 输出一次，input 不再带内置提示符（否则会出现重复提示）。'''
         async with self._io_lock:
             print(text)
-            return await asyncio.to_thread(input, "你: ")
+            return await asyncio.to_thread(input)
 
     # ========================================================================
 

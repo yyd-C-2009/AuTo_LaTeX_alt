@@ -61,6 +61,8 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     使用Tools对工具进行注册
     一个未全面竣工的本地保存数据库
 
+    文件编辑工具 str_replace_editor（view/create/str_replace/insert，路径限制在项目目录内）
+
 OCR 改动：
     - recognize_doc / recognize_image 由 async 改为同步阻塞函数（不再内部 to_thread），
       统一交由 Tools.async_execute 的 to_thread 分支调度到线程池，结构更简单。
@@ -130,7 +132,9 @@ OCR 改动：
      - 对话复盘自动固化为 Tool 的流程（目前仅提示词约定 + add_memory）
      - 消息历史 token 截断 message_cutter（Agent.py 已注释，函数本体已不存在）
      - tmp.py 的 recognize_doc 重构（资源管理/页标题/去重/5页硬截断）未并入正式 Visal.py
-     - PassageWrite「总结对话」缺数据通路：专家每次新建 messages，拿不到 Super 的对话历史
+     - ✅已实现：PassageWrite「总结对话」数据通路——build_super_tools 接收 Super 的 messages 引用，
+       专家被调用时用 _dialogue_context 提取「用户 ↔ Super」纯文本对话注入上下文
+       （过滤 role:tool/空 content，limit 截断；验证：python test_dialogue_path_demo.py）
      - terminal.py 已损坏，待修复或删除（见隐患 5）
 
  已知隐患（登记，修复后划掉）：
@@ -163,3 +167,12 @@ OCR 改动：
        专家一旦返回越权 tool_call 仍会被照单执行。已在 Agent.run_agent 增加执行层白名单校验：
        tool_names 非 None 时提交前校验 func_name 是否在允许集合内，越权则拒绝并回填错误消息。
        （验证：python test_authz_demo.py）
+    18.【高】✅已处理（新工具踩坑，根因记录）：给 Agent 的工具函数【勿加】`from __future__ import annotations`。
+       它会令 inspect.signature 拿到的注解变成字符串（如 "Optional[List[int]]"），
+       Tools.function_to_model 不解析字符串，会把字符串当类型塞给 create_model，
+       pydantic 报 PydanticUserError: ...you should define `Optional`...。
+       已通过移除 future import + 用 PEP604 写法 `X | None` 替代 `Optional[X]` 修复（str_replace_editor.py）。
+       （验证：python test_str_replace_editor_demo.py）
+    19.【低】✅已处理：Bus.io_dialog 曾重复输出提示——内部既 print(text) 又 input("你: ")，
+       导致调用 bus.io_dialog("你: ") 时屏幕出现两个「你: 」。已把 input 的内置提示符去掉，
+       提示只由 print(text) 输出一次（提示文本由调用方传入）。
