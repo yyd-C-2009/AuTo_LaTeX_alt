@@ -1,4 +1,4 @@
-r"""
+_OLD_DEMO = r'''  # 旧版交互式 demo 已废弃：整体保留为死字符串，无副作用，可安全删除
 MCP 流程对话测试 demo：
 只加载 OCR（Visal），把 recognize_doc 注册为工具，通过 Agent + 真实 LLM 对话，
 用户可以让 Agent 读取图片（如 test2.png）并识别其中的文字与 LaTeX 公式。
@@ -62,5 +62,4 @@ async def main():
             print(f"Agent: {out}")
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+'''

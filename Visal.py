@@ -94,7 +94,7 @@ class Visal:
     def recognize_doc(
         self,
         doc_path: Annotated[str,'PDF/PNG/JPG存放路径'] = None,
-        pages: Annotated[Optional[Union[str,list[int]]],'PDF页码编号, 总数不超过5'] = None,
+        pages: Annotated[Optional[Union[str,list[int]]],'PDF页码编号, 最多识别5页，超出自动截断为前5页'] = None,
         return_text:Annotated[bool,'是否返回文本类型'] = True
     )->dict[str,Any]:
         '''
@@ -125,6 +125,7 @@ class Visal:
         # 先归一化 pages（PDF 才需要）
         if self.is_pdf(doc_path):
             pages = self._safe_page_parser(pages=pages, pdf_path=doc_path)
+            pages = pages[:5]            # 页数硬上限 5：超出截断（防资源耗尽，docstring 声明的约束在代码层落实）
 
         if self.is_pdf(doc_path=doc_path):              # PDF：逐页缓存 + 逐页 OCR
             DPI = 150

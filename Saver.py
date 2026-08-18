@@ -40,8 +40,8 @@ class Saver:
     def add_memory(self,text: str, metadata: dict = None):
         '''写入记忆，使用前必须向user确认文本内容，避免误写'''
         doc_id = self.get_stable_id(text)  # 确定性ID
-        # 若同一文本重复写入，ChromaDB会根据ID自动覆盖，避免冗余
-        self.collection.add(
+        # 同一文本（相同MD5 ID）重复写入时用 upsert 覆盖，避免 ChromaDB DuplicateIDError
+        self.collection.upsert(
             ids=[doc_id],
             documents=[text],
             embeddings=[self.embed_text(text)],

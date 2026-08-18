@@ -94,10 +94,9 @@ def check_tikz(code: Annotated[str, "待验证的 TikZ 绘图代码（仅 tikzpi
     return "编译失败：\n" + "\n".join(log.splitlines()[-15:])
 
 
-# TODO: 旧版「不同 Agent 不同工具子集」机制，现改为所有 Agent 共用 bus.tools，
-# 「不同 Agent 不同工具」由之后的鉴权系统实现。先保留注释，待鉴权系统落地后删除。
-# def _filter_schema(schema: list, names: list) -> list:
-#     return [s for s in schema if s["function"]["name"] in names]
+# 鉴权说明：专家工具子集已通过 Agent.run_agent 的 tool_names 施加「执行层白名单」——
+# schema 级过滤只让 LLM 看不见，执行层校验才真正阻止越权提交（防止专家自我调用/互相甩锅）。
+# Super 调用 run_agent 时 tool_names=None，保留全量调度权。
 
 
 def build_super_tools(bus: Bus, client) -> Tools:
@@ -111,7 +110,7 @@ def build_super_tools(bus: Bus, client) -> Tools:
             task: Annotated[str, "交给该专家处理的任务或问题描述"] = "",
             _prompt: str = prompt,
             _name: str = name,
-            _names: list = tool_names,   # TODO: 鉴权系统落地后，专家工具子集由此给出
+            _names: list = tool_names,   # 专家工具子集（下划线参数不进 schema，LLM 无法篡改）
         ) -> str:
             msgs = [
                 {"role": "system", "content": _prompt},
@@ -120,7 +119,7 @@ def build_super_tools(bus: Bus, client) -> Tools:
             # 每个专家独立 Agent 实例（独立 pending / 独立对话历史）
             expert_agent = Agent(bus)
             # 输出通过 bus.io_print 互斥；专家 run_agent 内部 LLM 调工具也走 bus.submit
-            out = await expert_agent.run_agent(client, msgs, MODEL)
+            out = await expert_agent.run_agent(client, msgs, MODEL, tool_names=_names)   # tool_names 同时做 schema 过滤 + 执行层白名单，杜绝专家越权/递归调用
             if out:
                 await bus.io_print(f"[{_name}] {out}")
             return out if out else ""
@@ -130,6 +129,8 @@ def build_super_tools(bus: Bus, client) -> Tools:
         super_tools.add_tool(expert, time_out=180)
         # 关键：把专家工具标记为慢任务，Super 调用时走异步慢任务机制
         bus.mark_slow([f"{name}_expert"])
+        # 专家内部会再 submit 工具：标记为可重入（执行时不占用 semaphore，避免自我死锁）
+        bus.mark_reentrant([f"{name}_expert"])
 
     return super_tools
 
@@ -155,9 +156,8 @@ async def main():
 
     # 专家工具注册进 bus.tools（标记为 slow_task，Super 调用时异步化）
     build_super_tools(bus, client)
-    # Super 也持有记忆工具，用于复盘与上下文传递
-    tools.add_tool(data["agent_memory"].add_memory)
-    tools.add_tool(data["agent_memory"].retrieve_context)
+    # 记忆工具已在上方注册（见 tools.add_tool(add_memory/retrieve_context)），Super 复盘直接使用；
+    # 切勿重复 add_tool：同名工具会重复出现在 schema 中（历史 bug，已修复）
 
     # Super 自己也是一个 Agent（只负责路由，不负责具体读写）
     super_agent = Agent(bus)

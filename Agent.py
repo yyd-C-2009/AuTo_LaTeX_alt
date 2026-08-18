@@ -51,10 +51,20 @@ class Agent:
 
     async def run_agent(self,
         async_client, messages: list,
-        model: str = 'deepseek-v4-pro', max_step: int = 5
+        model: str = 'deepseek-v4-pro', max_step: int = 5,
+        tool_names: list[str] | None = None
     ) -> str | None:
-        '''单轮次对话循环：驱动 LLM <-> 工具（快任务同步、慢任务异步提交+轮询）'''
+        '''单轮次对话循环：驱动 LLM <-> 工具（快任务同步、慢任务异步提交+轮询）
+        tool_names: 为 None 使用 bus.tools 全量 schema；给定列表则按名字过滤（schema 级工具子集）'''
         steps = 0
+
+        # 工具 schema（可选子集过滤，一次算好整轮复用）
+        schema = self.bus.tools.schema if self.bus is not None else []
+        # 执行层鉴权白名单：tool_names 为 None 代表 Super（保留全量调度权），
+        # 否则只允许提交白名单内的工具（schema 级过滤只是「让专家看不见」，这里才是「调不动」）
+        allow = set(tool_names) if tool_names is not None else None
+        if allow is not None:
+            schema = [s for s in schema if s['function']['name'] in allow]
         while steps < max_step:
             print(f'TASKKKS{steps}')
             steps += 1
@@ -74,7 +84,7 @@ class Agent:
                 resp = await async_client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    tools=self.bus.tools.schema if self.bus is not None else [],
+                    tools=schema,
                     temperature=0,
                     tool_choice="auto"
                 )
@@ -89,8 +99,23 @@ class Agent:
             if msg.tool_calls:
                 for tool_called in msg.tool_calls:
                     func_name = tool_called.function.name
-                    kwargs = json.loads(tool_called.function.arguments)
+                    try:
+                        kwargs = json.loads(tool_called.function.arguments)
+                    except Exception as e:
+                        # LLM 返回非法 JSON：回填错误 tool 消息（保持 tool_call_id 配对），让 LLM 下轮自行修正
+                        tool_call_add(messages, f"参数 JSON 解析失败({type(e).__name__}): {e}，请修正参数格式后重试", tool_called.id)
+                        continue
                     print(f"LLM决定调用{func_name}，参数为{kwargs}")
+
+                    # 执行层鉴权：白名单外的工具一律拒绝执行（防止专家自我调用/互相甩锅）
+                    if allow is not None and func_name not in allow:
+                        tool_call_add(
+                            messages,
+                            f"拒绝调用 {func_name}：该工具不在你的权限范围内。你的可用工具为：{sorted(allow)}。请在本职责内完成任务，勿尝试调用其他专家或越权工具。",
+                            tool_called.id,
+                        )
+                        print(f"[鉴权拒绝] {func_name} 不在白名单 {sorted(allow)}，已拒绝")
+                        continue
 
                     result = await self.bus.submit(func_name=func_name, **kwargs)
 

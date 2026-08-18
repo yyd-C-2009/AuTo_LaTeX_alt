@@ -1,4 +1,5 @@
-from Agent import agent
+from Agent import Agent
+from event_bus import Bus
 from Tools import Tools
 import inspect,time,asyncio
 from pydantic import Field, create_model
@@ -27,7 +28,7 @@ def get_time() -> str:
     '''获取当前user处时间'''
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
-@Agent_tool.registry(5)
+# memory_saver 空 stub 已停用装饰器（原实现无任何写入逻辑，会误导 LLM）；正式记忆工具经下方 add_tool 接入
 def memory_saver(
     text:str = Field(default='',description='the memory need to save'),
     metadata: dict = Field(default=None,description='对text添加元对象')
@@ -47,13 +48,17 @@ async def terminal():
     Agent_tool.add_tool(agent_memory.add_memory)
     Agent_tool.add_tool(agent_memory.retrieve_context)
     Agent_tool.add_tool(agent_visal.recognize_doc,time_out=120)
+
+    # 当前 Agent 需要挂在 Bus 上运行
+    bus = Bus(Agent_tool, max_concurrency=4)
+    agent_runner = Agent(bus)
     while True:
         _Input = input()
         if _Input == "exit":
             break
         if _Input == "insert":
-            # agent(Agent_tool=Agent_tool)
-            asyncio.run(agent(Agent_tool=Agent_tool))
+            # agent 是 Agent 类的方法，需要 bus；已在上方构造 agent_runner
+            await agent_runner.agent()
         if  _Input== 'schema':
             print(Agent_tool.schema[0:])
         if _Input == 'add':
@@ -65,7 +70,8 @@ async def terminal():
             print(result)
         if _Input == 'run':
             tmp = input('输入目标')
-            res = asyncio.run(Agent_tool.async_execute('retrieve_context',tmp))
+            res = await Agent_tool.async_execute('retrieve_context',tmp)   # 已在事件循环内，不能再 asyncio.run
             print(res)
 
-asyncio.run(terminal())
+if __name__ == "__main__":
+    asyncio.run(terminal())

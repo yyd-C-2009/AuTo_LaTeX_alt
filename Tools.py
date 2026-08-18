@@ -72,6 +72,9 @@ def function_to_model(func: Callable):
     result = {}
     for _,inf in inspect.signature(func).parameters.items():
 
+        if inf.name.startswith('_'):
+            continue        # 内部参数（下划线前缀）不进 schema，防止 LLM 篡改闭包配置
+
         if get_origin(inf.annotation) is Annotated:
 
             args = get_args(inf.annotation)
@@ -164,7 +167,7 @@ class Tools:
 
     def registry(self,time_out:float = 5.0):
 
-        def decorater(func : function):
+        def decorater(func : Callable):
         
             @wraps(func)
             def wrapper(*args,**kwargs):
