@@ -51,6 +51,7 @@ class Bus():
         self._task_ttl = 600.0                    # 已完成结果保留秒数，超时自动清理（防内存泄漏）
         self.slow_tasks = set()                   # 走 submit 的慢任务名集合
         self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
+        self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
         # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
         self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
@@ -198,10 +199,6 @@ class Bus():
         return None
 
     def poll(self,id : int): 
-        '''查询慢任务结果：处理中→Submitted；完成→原结果并销毁；未知/已取走→Error（避免误导性重查）'''
-        self._gc_task_results()
-        if id not in self.task_results:
-            return Message(**{'title':'Error','content':{'error':f'task_id {id} 不存在（从未提交、结果已被取走或已过期）','error_type':'UnknownTaskId'}})
         result = self.task_results.get(id,NEF)
         if result is NEF:
             return Message(title='Submitted',content={'id' : id})
@@ -264,10 +261,7 @@ class Bus():
     async def _run_slow(self, id: int, func_name:str,**kwargs):
         '''慢任务执行器，不回传，执行完毕后将结果写入task_results'''
         try:
-            if func_name not in self.reentrant_tasks:
-                async with self.semaphore:
-                    result = await self.tools.async_execute(func_name=func_name,**kwargs)
-            else:                                # 可重入任务（如专家）：执行不占 semaphore 名额，避免「持锁等锁」死锁
+            async with self.semaphore:
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)
             self.task_results[id] = Message(title='Done',content=result)
         except Exception as e:
