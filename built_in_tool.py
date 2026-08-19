@@ -12,6 +12,7 @@
 
 import urllib.parse
 import urllib.request
+import json
 import html
 import re
 from typing import Annotated
@@ -130,6 +131,46 @@ def web_fetch(
         return text
     except Exception as e:
         return f"网页抓取失败: {type(e).__name__}: {e}"
+
+
+def get_weather(
+    city: Annotated[str, "城市名称（支持中文/拼音/英文，如 北京 / Beijing）"],
+    unit: Annotated[str, "温度单位，celsius=摄氏(默认) / fahrenheit=华氏"] = "celsius",
+) -> str:
+    """查询某个城市的实时天气（数据来自 wttr.in，无需 API key）。返回温度、体感、天气、湿度、风速。"""
+    try:
+        if not city or not city.strip():
+            raise ValueError("城市不能留空")
+        unit = unit.lower() if unit else "celsius"
+        if unit not in ("celsius", "celsius", "c", "fahrenheit", "f"):
+            unit = "celsius"
+        url = "https://wttr.in/" + urllib.parse.quote(city.strip()) + "?format=j1"
+        body = _open(url, timeout=25).read().decode("utf-8", "ignore")
+        data = json.loads(body)
+        cur = (data.get("current_condition") or [{}])[0]
+        temp_key = "temp_" + ("C" if unit.startswith("c") else "F")
+        feels_key = "FeelsLike" + ("C" if unit.startswith("c") else "F")
+        temp = cur.get(temp_key, "?")
+        feels = cur.get(feels_key, "?")
+        desc = ""
+        wd = cur.get("weatherDesc") or [{}]
+        if wd:
+            desc = wd[0].get("value", "")
+        humidity = cur.get("humidity", "?")
+        wind = cur.get("windspeedKmph", "?")
+        area = data.get("nearest_area") or [{}]
+        place = ""
+        if area:
+            place = ", ".join(x.get("value", "") for x in area[0].get("areaName", []) if x.get("value"))
+        unit_symbol = "°C" if unit.startswith("c") else "°F"
+        return (
+            f"{city}({place}) 实时天气: {desc}, {temp}{unit_symbol}, "
+            f"体感 {feels}{unit_symbol}, 湿度 {humidity}%, 风速 {wind} km/h"
+        )
+    except json.JSONDecodeError:
+        return f"天气服务返回数据解析失败（{city}），请稍后再试或更换城市写法。"
+    except Exception as e:
+        return f"天气查询失败: {type(e).__name__}: {e}"
 
 
 if __name__ == "__main__":

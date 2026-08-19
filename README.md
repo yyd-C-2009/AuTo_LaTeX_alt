@@ -67,11 +67,31 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     .png/.pdf 标记为二进制不做转换，减少跨平台协作时的行尾杂音。
 
     联网工具 built_in_tool.py：web_search（DuckDuckGo HTML 端点，无需 API key）、
-    web_fetch（抓取网页转纯文本）。均同步阻塞，经 Tools.async_execute 走 to_thread；
-    已在 super.py main() 注册（time_out=60）。
+    web_fetch（抓取网页转纯文本）、get_weather（wttr.in 实时天气）。
+    均同步阻塞，经 Tools.async_execute 走 to_thread；已在 super.py main() 注册
+    （web_search/web_fetch time_out=60，get_weather time_out=15）。
 
     LaTeX 语法检查工具 check_latex（super.py）：用 pdflatex -draftmode 编译 latex_output/ 下的
     .tex 文件，只做语法检查、不生成 PDF；已加入 mathwrite / passagewrite 的 tool_names。
+
+    Super 提示词查看工具 view_expert_prompts（super.py）：返回 EXPERTS 中每位专家的系统提示词
+    与工具白名单；已注册为全局工具（time_out=5）。Super 复盘诊断提示词时可调用；
+    专家因 tool_names 白名单不可见此工具，也不会越权调用。
+
+    定理环境规范查看工具 view_theorem_style（super.py）：读取项目根目录 example.tex 全文并返回，
+    作为 LaTeX 定理环境与 label/ref 命令的唯一规范来源；已注册为全局工具（time_out=5），
+    并加入 mathwrite / passagewrite 的 tool_names。
+
+    terminal.py 多Agent直接对话终端（重置版）：支持 /db 查看数据库、/agent 切换直接对话身份、
+    /branch 对话分支（list/fork/new/switch/rm）、/cd 切换工作目录、/pwd 查看工作目录、
+    /whoami、/help、/exit；复用 super.py 的 register_common_tools / build_client / build_super_tools。
+
+    Setup.py 一键安装脚本：pip 走清华/阿里云/中科大镜像，HuggingFace 模型走 hf-mirror.com；
+    默认安装依赖并下载 BGE 嵌入模型，--with-ocr 可预下载 Pix2Text OCR 模型。
+
+    Listener 音频转写与连续监听（listener.py）：Listener 类在 init() 中常驻加载 Faster-Whisper，
+    transcribe_audio 转写音频文件，start_listening/stop_listening/get_listen_result 连续监听；
+    已注册为全局工具并加入 listener 专家白名单。
 
     清理：已删除所有 test_*.py 以及 tmp.py、trail.py（实验/损坏代码）；
     历史条目中「验证：python test_*.py」为过往修复记录，对应 test 文件已被清理。
@@ -131,22 +151,27 @@ OCR 改动：
     - 注意：当前工具式子 Agent（被动被 Super 路由调用）已够用，暂不做「常驻挂起」主动模型。
 
  当前未实现功能（登记，做了就划掉，新发现的及时补进来）：
-     - ✅已实现：联网功能——built_in_tool.py 提供 web_search / web_fetch（见「已实现功能」）。
-     - Listener 音频听写：音频 API 监听、课堂内容记录（未实现）
+     - ✅已实现：联网功能——built_in_tool.py 提供 web_search / web_fetch / get_weather（见「已实现功能」）。
+     - ✅已实现：Listener 音频听写——Listener 类常驻 Faster-Whisper 模型，提供 transcribe_audio、
+       start_listening/stop_listening/get_listen_result 连续监听；EXPERTS 已加入 listener，
+       Setup.py 可 --with-listener 预下载模型，sounddevice 麦克风依赖已加入 Setup.py。
      - 流式 IO 支持（未实现）
      - ✅已实现：LaTeX 语法检查工具 check_latex（只做语法检查，不生成 PDF）：
        用 pdflatex -draftmode 编译 latex_output/ 下的 .tex 文件，
        已加入 mathwrite / passagewrite 的 tool_names（「可写文件」专家），未加入 Math（不可见）。
-     - 「查看其他 Agent 提示词」工具：配合 SUPER_PROMPT 新增的
+     - ✅已实现：「查看其他 Agent 提示词」工具 view_expert_prompts（见「已实现功能」）。
+       配合 SUPER_PROMPT 新增的
        "同时，诊断当前对于各个专家的提示词是否合理，是否需要调整。"
-       提供一个工具让 Super（或相关诊断者）能读取 EXPERTS 里各专家的提示词文本，
+       Super 可随时调用 view_expert_prompts 读取 EXPERTS 里各专家的系统提示词与工具白名单，
        便于 Super 在复盘时对比判断各专家提示词是否合理、需要调整。
      - LaTeX-label 管理工具：供 passage_editer(PassageWrite) 查看当前文档中公式的编号情况
        （如 \label / \eqref / 编号是否缺失、是否重复），帮助纠正「不爱给公式编号」的习惯。
      - 提示词打磨：目前专家过多用中文解释问题，缺少严谨的论述过程；需要修改各专家提示词，
        引导专家输出严谨、有推导过程的论述，而非中文口语化解释。
-     - 自定义指令工具（数个 tool）：后续 LaTeX 编辑会在一些「已定义的自定义指令」前提下进行，
+     - 自定义指令工具（数个 tool，部分已实现）：后续 LaTeX 编辑会在一些「已定义的自定义指令」前提下进行，
        需要提供若干工具让专家认识、查询这些已定义的自定义指令（及其语义/用法），避免误用或重复造轮子。
+       已实现 view_theorem_style（定理环境与 label/ref 规范，见「已实现功能」）；
+       其余自定义指令查询工具待补。
      - Super 自主 Plan（有向图流程设计）、指定位置修改的 tool（暂缓）
      - 鉴权系统（执行层白名单，已实现）：Agent.run_agent 通过 tool_names 施加「执行层白名单」——
        schema 级过滤只让专家「看不见」，执行层校验才真正阻止越权提交，杜绝专家自我调用/互相甩锅；
@@ -162,7 +187,85 @@ OCR 改动：
      - ✅已实现：PassageWrite「总结对话」数据通路——build_super_tools 接收 Super 的 messages 引用，
        专家被调用时用 _dialogue_context 提取「用户 ↔ Super」纯文本对话注入上下文
        （过滤 role:tool/空 content，limit 截断；验证：python test_dialogue_path_demo.py）
-     - terminal.py 已损坏，待修复或删除（见隐患 5，隐患描述已同步更新）
+     - ✅已实现：terminal.py 已重置为多Agent直接对话终端（见「已实现功能」），
+       提供 /db 查看数据库、/agent 切换身份、/branch 对话分支等系统指令。
+
+ MathWrite 定理环境编写规范（依据 example.tex，已实施）：
+   - 新增只读工具 view_theorem_style（super.py）：读取项目根目录 example.tex 全文并返回，
+     已注册为全局工具（time_out=5），并加入 mathwrite / passagewrite 的 tool_names。
+     Super 全局可见；mathwrite / passagewrite 按白名单可见；math / draw 不可见。
+   - 已更新 EXPERTS["mathwrite"] 与 EXPERTS["passagewrite"] 提示词：
+     写/改 .tex 前必须先调用 view_theorem_style 获取规范，导言区与定理环境必须按
+     example.tex 的约定执行，写完后必须调用 check_latex 直到通过。
+
+   规范要点（以 example.tex 原文为准）：
+     - 导言区：`\documentclass{book}`；宏包 inputenc / xeCJK / amsmath,amsthm,amssymb /
+       graphicx / booktabs / enumitem / hyperref / bm / darkmode 按需保留；
+     - 定理环境声明：
+       `\newtheorem{theorem}{Theorem}[section]`、
+       `\newtheorem{lemma}[theorem]{Lemma}`、
+       `\newtheorem{proposition}[theorem]{Proposition}`、
+       `\newtheorem{corollary}[theorem]{Corollary}`、
+       `\newtheorem{definition}[theorem]{Definition}`、
+       `\newtheorem{remark}{Remark}[section]`、
+       `\newtheorem{Example}{Example}[section]`、
+       `\newenvironment{solution}{\begin{proof}[Solution]}{\end{proof}}`；
+     - 标签命令：`\theolabel{key}` / `\lemmlabel{key}` / `\proplabel{key}` /
+       `\corolabel{key}` / `\deflabel{key}` / `\exaplabel{key}`；
+     - 引用命令：`\theoref{theo:key}` / `\lemmref{lem:key}` / `\propref{prop:key}` /
+       `\cororef{coro:key}` / `\defref{def:key}` / `\exapref{exap:key}`；
+       注意 ref 参数是「带前缀的完整标签」（如 `\defref{def:something}`）。
+     - proof 不编号；solution 环境等价于 proof 的 Solution 标题；
+       行间公式继续使用 `\label` 编号，引用用 `\eqref`。
+
+   验收方式：
+     - mathwrite / passagewrite 输出文件中不得自行编写与 example.tex 冲突的 `\newtheorem`
+       或 label 前缀；定理类环境共享 theorem 计数器，remark/Example 独立按 section 计数；
+     - 每次写完/改完 .tex 后必须调用 check_latex，直到返回「语法检查通过」。
+
+ Listener 音频转写（已实施，Faster-Whisper small/int8）：
+   目标：新增 Listener 专家/工具，将课堂音频（文件或麦克风）转写为文字，
+   并把转写结果交给 Super/PassageWrite 做课堂记录。
+
+   模型选型（已确认：Faster-Whisper small/int8/CPU）：
+     A. Faster-Whisper（推荐）：faster-whisper + CTranslate2，CPU 可跑，支持中英、
+        时间戳、VAD。模型走 HF 镜像下载：tiny/base/small/medium/large-v3；
+        中文课堂建议 small（约 484MB，均衡）或 medium（约 1.5GB，更准）。
+     B. OpenAI Whisper（openai-whisper + PyTorch）：生态成熟，但 CPU 慢、内存高；
+        不优先推荐。
+     C. FunASR（阿里，ModelScope）：中文 ASR 与标点最强，但依赖更重；
+        适合对中文准确率要求高的场景。
+     D. 云 API（OpenAI/讯飞等）：无需本地模型，但需网络与密钥；可作为后续扩展。
+
+   实施内容（已完成）：
+     1. listener.py 重构为 Listener 类，与 Visal 相同的长生命周期模式：
+        在 initer.init() 中创建一次，Faster-Whisper 模型加载后常驻内存，不重复卸载；
+        register_common_tools 注册该实例的 bound methods。
+     2. 单文件转写 transcribe_audio(audio_path, language="auto", task="transcribe") -> str，
+        返回带时间戳文本；模型目录支持 LISTENER_MODEL_DIR，默认 ./models/faster-whisper-small；
+        目录不存在时自动从 hf-mirror.com 下载（listener.py 中 setdefault HF_ENDPOINT）。
+     3. 连续监听（依赖 sounddevice）：
+         - start_listening(segment_duration=8.0, sample_rate=16000)：后台线程启动麦克风流，
+           按段转写并累积到内存；
+         - get_listen_result(include_timestamps=True)：只读查看当前累积转写，不会取走/清空内容；
+         - stop_listening(include_timestamps=True)：停止监听并返回累积转写（不清空）；
+         - clear_listen_result(confirm=True)：显式清空累积转写。
+     4. Setup.py 已加入 faster-whisper / sounddevice / numpy 依赖，并新增
+        --with-listener / --listener-size 参数，可预下载 Systran/faster-whisper-<size>
+        到 ./models/faster-whisper-<size>。
+     5. EXPERTS 已增加 "listener"：tool_names=["transcribe_audio", "start_listening",
+        "stop_listening", "get_listen_result", "clear_listen_result"]；
+        build_super_tools 自动注册 listener_expert，且 listener_expert 超时放宽到 1800s。
+     6. 数据通路：Super/PassageWrite 可调用 listener_expert 转写音频/连续监听，再由
+        PassageWrite 总结为课堂记录；当前连续监听为「手动启动/停止」模式。
+     7. 权限边界：连续监听有状态工具（start_listening / stop_listening / get_listen_result /
+        clear_listen_result）只允许 listener_expert 通过白名单调用；Super 直接对话时通过
+        run_agent 的 deny_tools 禁用这些工具，必须经 listener_expert 间接使用，避免多 Agent
+        轮流读取/清空同一份累积转写造成状态竞争。transcribe_audio 仍对 Super 全局可见。
+
+   后续可扩展（未实施）：
+     - 实时 VAD 静音分段（当前按固定秒数分段）；
+     - Listener 主动汇报：接 Bus.emit/subscribe（当前 deliver 循环仍是死代码，暂不依赖）。
 
  已知隐患（登记，修复后划掉）：
      1.【高】✅已修复（核对确认）：super.py 中 add_memory / retrieve_context 只 add_tool 一次（144-145 行），
@@ -172,11 +275,9 @@ OCR 改动：
      3.【高】✅已修复（核对确认）：_ans_executer 对 isinstance(result, Message) 的返回值原样返回，
        不再外包 Done，快任务错误能正确显示 Error。
      4.【高】✅已修复（核对确认）：json.loads 已包 try/except，解析失败回填错误 tool 消息让 LLM 自行修正。
-     5.【低】terminal.py 为遗留的独立入口脚本，已不再维护（正式入口是 super.py）：
-       它直接调用旧流程 Agent.agent()，与当前 super.py 的多 Agent 架构不一致；
-       并仍调用 init() 加载重模型，仅供早期调试，建议删除。
-       （原「from Agent import agent」与「def decorater(func: function) 的 function 未定义」
-       两处 NameError 已在代码演进中修正，剩余为逻辑过时问题。）
+     5.【低】✅已处理：terminal.py 已重置为多Agent直接对话终端（见「已实现功能」），
+       旧版「独立入口脚本 + Agent.agent()」已移除；新版复用 super.py 的公共工具注册、
+       client 构建与专家工具注册，支持 /db、/agent、/branch 等系统指令。
      6.【高】慢任务超限结果丢失，且残留 pending 带入下一轮对话。
      7.【中】✅已修复（核对确认）：Visal.py recognize_doc 中 pages = pages[:5] 硬截断为前 5 页。
      8.【中】✅已处理：Saver.add_memory 由 collection.add 改为 collection.upsert，
@@ -190,7 +291,8 @@ OCR 改动：
        已成接口约定（缓存文件/测试均依赖），改名需同步迁移旧缓存。
     13.【低】Agent.py 调试残留 print(TASKKKS...)；慢任务等待固定 sleep(10) 且烧 step。
     14.【低】super.py 直接读 os.environ["DSH_OPENAI_KEY"]，缺失时 KeyError 无友好提示。
-    15.【低】硬编码：Saver 嵌入模型绝对路径、base_url、模型名（换机器必须改）。
+    15.【低】部分处理：Saver 嵌入模型路径已支持 BGE_MODEL_DIR 与项目内 ./models/bge-base-zh-v1.5
+        （Setup.py 会下载到该目录）；base_url、模型名仍硬编码，换机器仍需改。
     16.【低】✅已清理：trail.py 已删除（原为错误用法的忙循环实验代码：to_thread 传协程 + 无 await）。
     17.【高】✅已处理（鉴权，新增问题）：Agent 会自己调用自己/其他专家互相甩锅——根因是
        schema 级过滤只能让 LLM「看不见」其他工具，但 bus.submit 执行时不校验调用者身份，
@@ -215,3 +317,43 @@ OCR 改动：
        LLM 主动调用时被 Agent.run_agent 拦截（不经 bus.submit/鉴权），强制注入当前 Agent 的缓存并返回，读后清空。
        慢任务等待改由 _wait_pending 轮询 poll，不消耗 max_step（避免 Super 提前放弃 Timeout）。
        （验证：python test_delayed_results_demo.py）
+
+ 本次修改记录（本次编辑新增）：
+     - super.py 新增 view_expert_prompts 工具：返回 EXPERTS 中每位专家的系统提示词与工具白名单；
+       已在 main() 注册（time_out=5），并更新 SUPER_PROMPT 提示 Super 在诊断提示词时可调用。
+     - README 补充记录 built_in_tool.py / super.py 中已加入的 get_weather 天气工具（wttr.in，time_out=15）。
+     - super.py 新增 view_theorem_style 工具：读取 example.tex 全文作为定理环境与 label/ref 规范，
+       已在 main() 注册（time_out=5），并加入 mathwrite / passagewrite 的 tool_names。
+     - 更新 EXPERTS["mathwrite"] / EXPERTS["passagewrite"] 提示词：写/改 .tex 前先调用
+       view_theorem_style，严格按 example.tex 的导言区、定理环境声明与 label/ref 命令执行，
+       写完必须 check_latex 直到通过。
+     - README 将「MathWrite 定理环境编写计划」更新为「已实施」并补充规范要点与验收方式。
+     - terminal.py 重置为多Agent直接对话终端：新增 /db（查看数据库）、/agent（切换直接对话 Agent）、
+       /branch（对话分支 list/fork/new/switch/rm）、/whoami、/help、/exit 系统指令；
+       切换 Agent 会清空当前分支历史，分支 fork/new/switch/rm 管理多线对话。
+     - Saver.py 新增 list_memories()：读取 chromadb 中全部记忆（id/text/metadata），
+       供 terminal.py 的 /db 命令使用，不注册为 Agent 工具。
+     - super.py 抽出 register_common_tools() 与 build_client()，供 super.py 与 terminal.py 共用，
+       避免两套 REPL 注册工具/创建 client 的逻辑漂移。
+     - CLAUDE.md 同步更新 terminal.py 描述（直接对话多Agent终端）与 initer/Saver 相关说明。
+     - 新增 Setup.py：pip 依赖安装（清华/阿里云/中科大镜像，自动切换）+ BGE 嵌入模型下载；
+       --with-ocr 可预下载 Pix2Text OCR 模型，--skip-models 只装依赖。
+     - Saver.py load_embedder 改为按「显式参数 > BGE_MODEL_DIR > ./models/bge-base-zh-v1.5 >
+       旧机器路径」顺序查找，新机器无需改代码即可使用 Setup.py 下载的模型。
+     - Visal.py 在导入 pix2text 前默认设置 HF_ENDPOINT=https://hf-mirror.com（不覆盖已有值）。
+     - README 新增 Listener 实现方案，经确认后已实施（Faster-Whisper small/int8/CPU）。
+     - 新增 listener.py：Faster-Whisper 本地音频转写工具 transcribe_audio；模型懒加载，
+       默认 small/int8/CPU，支持 LISTENER_MODEL_DIR/LISTENER_MODEL_SIZE/HF_ENDPOINT 覆盖。
+     - super.py EXPERTS 增加 listener 专家，SUPER_PROMPT 增加 listener_expert；
+       register_common_tools 注册 transcribe_audio；listener_expert 超时 1800s。
+     - Setup.py 增加 faster-whisper 依赖与 --with-listener/--listener-size 参数，
+       可预下载 Systran/faster-whisper-small 到 ./models/faster-whisper-small。
+     - terminal.py 新增 /cd <path> 切换工作目录、/pwd 查看当前工作目录。
+     - listener.py 重构为 Listener 类，并接入 initer.init()：模型启动时加载一次、常驻内存；
+        register_common_tools 改为注册实例方法。
+     - 新增连续监听工具 start_listening / stop_listening / get_listen_result（sounddevice 麦克风，
+       后台线程按段转写并累积）；Setup.py 增加 sounddevice/numpy 依赖。
+     - get_listen_result 改为只读（不取走/不清空），新增 clear_listen_result(confirm=True) 显式清空。
+     - Listener 加载时打印实际模型路径/来源（本地目录或 HF 缓存），便于确认下载位置。
+     - Agent.run_agent 增加 deny_tools 参数：Super 直接对话时禁用连续监听有状态工具，
+       只能通过 listener_expert 间接使用，避免多 Agent 轮流读取/清空同一份累积转写。

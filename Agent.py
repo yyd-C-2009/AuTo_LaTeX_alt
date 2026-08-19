@@ -64,10 +64,12 @@ class Agent:
     async def run_agent(self,
         async_client, messages: list,
         model: str = 'deepseek-v4-pro', max_step: int = 5,
-        tool_names: list[str] | None = None
+        tool_names: list[str] | None = None,
+        deny_tools: list[str] | None = None,
     ) -> str | None:
         '''单轮次对话循环：驱动 LLM <-> 工具（快任务同步、慢任务异步提交+轮询）
-        tool_names: 为 None 使用 bus.tools 全量 schema；给定列表则按名字过滤（schema 级工具子集）'''
+        tool_names: 为 None 使用 bus.tools 全量 schema；给定列表则按名字过滤（schema 级工具子集）。
+        deny_tools: 需要从 schema 和执行层同时禁用的工具名列表（用于 Super 禁用有状态工具）。'''
         steps = 0
 
         # 工具 schema（可选子集过滤，一次算好整轮复用）
@@ -75,9 +77,12 @@ class Agent:
         # 执行层鉴权白名单：tool_names 为 None 代表 Super（保留全量调度权），
         # 否则只允许提交白名单内的工具（schema 级过滤只是「让专家看不见」，这里才是「调不动」）
         allow = set(tool_names) if tool_names is not None else None
+        deny = set(deny_tools) if deny_tools is not None else None
         if allow is not None:
             # view_delayed_results 始终开放：每个 Agent 都能查看「自己的」延迟结果缓存
             schema = [s for s in schema if s['function']['name'] in allow or s['function']['name'] == 'view_delayed_results']
+        if deny is not None:
+            schema = [s for s in schema if s['function']['name'] not in deny]
         while steps < max_step:
             print(f'TASKKKS{steps}')
             steps += 1
@@ -131,6 +136,16 @@ class Agent:
                         tool_call_add(messages, str(cached), tool_called.id)
                         self.delayed_results = []   # 读后清空
                         print(f"[延迟结果窗口] 返回 {len(cached)} 条延迟结果")
+                        continue
+
+                    # 执行层鉴权：禁用名单内的工具一律拒绝执行（Super 用于禁用有状态工具）
+                    if deny is not None and func_name in deny:
+                        tool_call_add(
+                            messages,
+                            f"拒绝调用 {func_name}：该工具为 Listener 连续监听的内部有状态工具，请通过 listener_expert 间接使用。",
+                            tool_called.id,
+                        )
+                        print(f"[鉴权拒绝] {func_name} 在禁用名单中，已拒绝")
                         continue
 
                     # 执行层鉴权：白名单外的工具一律拒绝执行（防止专家自我调用/互相甩锅）

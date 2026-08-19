@@ -1,0 +1,64 @@
+%所有LaTeX文件的默认开头
+\documentclass{book}
+\usepackage{inputenc}
+\usepackage[quiet]{xeCJK} % 中文支持
+\usepackage{amsmath,amsthm,amssymb,example,proof} % 数学包
+\usepackage{graphicx} % 插入图片
+\usepackage{booktabs} % 美化表格
+\usepackage{enumitem} % 自定义列表
+\usepackage{hyperref} % 超链接
+\usepackage{bm} % 加粗
+\usepackage[enable]{darkmode} %深色模式
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}{Remark}[section]
+\newtheorem{Example}{Example}[section]
+\newenvironment{solution}{\begin{proof}[Solution]}{\end{proof}}%公式环境定义
+
+% 各种常用定理环境的声明，由各自的自动编号和引用机制
+\newcommand{\textif}[1]{\textit\textbf{#1}}
+\newcommand{\defref}[1]{{\bfseries Definition~\ref{#1}}}        
+\newcommand{\deflabel}[1]{\label{def:#1}}
+\newcommand{\lemmref}[1]{{\bfseries Lemma~\ref{#1}}}
+\newcommand{\lemmlabel}[1]{\label{lem:#1}}
+\newcommand{\propref}[1]{{\bfseries Proposition~\ref{prop:#1}}}
+\newcommand{\proplabel}[1]{\label{prop:#1}}
+\newcommand{\theoref}[1]{{\bfseries Theorem~\ref{theo:#1}}}
+\newcommand{\theolabel}[1]{\label{theo:#1}}
+\newcommand{\cororef}[1]{{\bfseries Corollary~\ref{coro:#1}}}
+\newcommand{\corolabel}[1]{\label{coro:#1}}
+\newcommand{\exapref}[1]{{\bfseries Example~\ref{exap:#1}}}
+\newcommand{\exaplabel}[1]{\label{exap:#1}}%公式自动编号（限英文）
+%开头结束
+
+\begin{document}
+    %使用样例 5 个
+    \begin{proof}%不编号
+        %context
+    \end{proof}
+
+    \begin{proposition}\proplabel{something}%编号
+        %context
+    \end{proposition}
+    \propref{prop:something}%引用 
+
+    \begin{definition}\deflabel{something}%编号
+        %context
+    \end{definition}
+    \defref{def:something}%引用 
+
+    \begin{corollary}\corolabel{something}%编号
+        %context
+    \end{corollary}
+    \cororef{coro:something}%引用 
+
+    \begin{lemma}\lemmlabel{something}%编号
+        %context
+    \end{lemma}
+    \lemmref{lem:something}%引用 
+
+\end{document}

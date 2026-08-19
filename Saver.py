@@ -20,15 +20,30 @@ class Saver:
         return hashlib.md5(text.encode('utf-8')).hexdigest()
 
     # ---------- 2. 离线优先的嵌入模型加载 ----------
-    def load_embedder(self,local_dir: str = "C:/Users/yangyiding/.cache/huggingface/hub/models--BAAI--bge-base-zh-v1.5/snapshots/f03589ceff5aac7111bd60cfc7d497ca17ecac65"):
-        if not os.path.isdir(local_dir):
-            raise RuntimeError(
-                f"模型目录缺失。请离线下载至 {local_dir}。"
-                "推荐命令（使用modelscope）："
-                "modelscope download --model AI-ModelScope/bge-base-zh-v1.5 --local_dir ./models/bge-base-zh-v1.5"
-            )
-        # 强制 local_files_only=True，彻底规避防火墙
-        return SentenceTransformer(local_dir, local_files_only=True)
+    def load_embedder(self, local_dir: str | None = None):
+        # 查找顺序：显式参数 > 环境变量 BGE_MODEL_DIR > 项目本地 ./models/bge-base-zh-v1.5 > 旧机器兼容路径。
+        candidates: list[str] = []
+        if local_dir:
+            candidates.append(local_dir)
+        env_dir = os.environ.get("BGE_MODEL_DIR")
+        if env_dir:
+            candidates.append(env_dir)
+        candidates.append(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "bge-base-zh-v1.5")
+        )
+        candidates.append(
+            "C:/Users/yangyiding/.cache/huggingface/hub/models--BAAI--bge-base-zh-v1.5/snapshots/f03589ceff5aac7111bd60cfc7d497ca17ecac65"
+        )
+        for directory in candidates:
+            if directory and os.path.isdir(directory):
+                # 强制 local_files_only=True，彻底规避防火墙
+                return SentenceTransformer(directory, local_files_only=True)
+        raise RuntimeError(
+            "BGE 嵌入模型目录缺失。请先运行 python Setup.py 下载模型，"
+            "或手动执行：modelscope download --model AI-ModelScope/bge-base-zh-v1.5 "
+            "--local_dir ./models/bge-base-zh-v1.5（也可用 HF 镜像下载 BAAI/bge-base-zh-v1.5）。"
+            "下载后可通过环境变量 BGE_MODEL_DIR 指定目录；默认查找项目内 ./models/bge-base-zh-v1.5。"
+        )
 
 
 
@@ -63,3 +78,21 @@ class Saver:
             unique_docs = list(dict.fromkeys(results['documents'][0]))
             return "\n---\n".join(unique_docs)
         return "No data"
+
+    # ---------- 6. 查看全部记忆（terminal.py 的 /db 命令使用，不注册为 Agent 工具） ----------
+    def list_memories(self) -> list:
+        """列出数据库中的全部记忆，返回 [{"id":..., "text":..., "metadata":...}]。"""
+        if self.collection.count() == 0:
+            return []
+        data = self.collection.get(include=["documents", "metadatas"])
+        ids = data.get("ids") or []
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        result = []
+        for i, doc_id in enumerate(ids):
+            result.append({
+                "id": doc_id,
+                "text": docs[i] if i < len(docs) else "",
+                "metadata": metas[i] if i < len(metas) else None,
+            })
+        return result

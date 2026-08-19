@@ -1,5 +1,6 @@
 import os
 os.environ['ORT_PROVIDERS'] = 'DmlExecutionProvider,CPUExecutionProvider'
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')  # 无 HF 环境时默认走 hf-mirror 中文镜像下载 Pix2Text 模型
 import asyncio,re
 from pix2text import Pix2Text
 import io
