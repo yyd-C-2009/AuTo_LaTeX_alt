@@ -66,6 +66,16 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     .gitattributes（* text=auto + * text eol=lf）：统一所有文本文件行尾为 LF，
     .png/.pdf 标记为二进制不做转换，减少跨平台协作时的行尾杂音。
 
+    联网工具 built_in_tool.py：web_search（DuckDuckGo HTML 端点，无需 API key）、
+    web_fetch（抓取网页转纯文本）。均同步阻塞，经 Tools.async_execute 走 to_thread；
+    已在 super.py main() 注册（time_out=60）。
+
+    LaTeX 语法检查工具 check_latex（super.py）：用 pdflatex -draftmode 编译 latex_output/ 下的
+    .tex 文件，只做语法检查、不生成 PDF；已加入 mathwrite / passagewrite 的 tool_names。
+
+    清理：已删除所有 test_*.py 以及 tmp.py、trail.py（实验/损坏代码）；
+    历史条目中「验证：python test_*.py」为过往修复记录，对应 test 文件已被清理。
+
 OCR 改动：
     - recognize_doc / recognize_image 由 async 改为同步阻塞函数（不再内部 to_thread），
       统一交由 Tools.async_execute 的 to_thread 分支调度到线程池，结构更简单。
@@ -121,12 +131,12 @@ OCR 改动：
     - 注意：当前工具式子 Agent（被动被 Super 路由调用）已够用，暂不做「常驻挂起」主动模型。
 
  当前未实现功能（登记，做了就划掉，新发现的及时补进来）：
-     - 联网功能（目标栏已列，尚未实现）
+     - ✅已实现：联网功能——built_in_tool.py 提供 web_search / web_fetch（见「已实现功能」）。
      - Listener 音频听写：音频 API 监听、课堂内容记录（未实现）
      - 流式 IO 支持（未实现）
-     - LaTeX 语法检查工具（只做语法检查，不生成 PDF）：供「可写文件」的专家使用，
-       该工具被标记为「写文件」性质，只出现在允许写文件的专家的 tool_names 中，
-       对「只能读文件、不能编辑文件」的专家（如 Math）不可见。
+     - ✅已实现：LaTeX 语法检查工具 check_latex（只做语法检查，不生成 PDF）：
+       用 pdflatex -draftmode 编译 latex_output/ 下的 .tex 文件，
+       已加入 mathwrite / passagewrite 的 tool_names（「可写文件」专家），未加入 Math（不可见）。
      - 「查看其他 Agent 提示词」工具：配合 SUPER_PROMPT 新增的
        "同时，诊断当前对于各个专家的提示词是否合理，是否需要调整。"
        提供一个工具让 Super（或相关诊断者）能读取 EXPERTS 里各专家的提示词文本，
@@ -148,10 +158,11 @@ OCR 改动：
      - 对话复盘自动固化为 Tool 的流程（目前仅提示词约定 + add_memory）
      - 消息历史 token 截断 message_cutter（Agent.py 已注释，函数本体已不存在）
      - tmp.py 的 recognize_doc 重构（资源管理/页标题/去重/5页硬截断）未并入正式 Visal.py
+       （注：tmp.py 已删除，此重构未发生，本条目留作历史，正式 Visal.py 仍是当前实现）
      - ✅已实现：PassageWrite「总结对话」数据通路——build_super_tools 接收 Super 的 messages 引用，
        专家被调用时用 _dialogue_context 提取「用户 ↔ Super」纯文本对话注入上下文
        （过滤 role:tool/空 content，limit 截断；验证：python test_dialogue_path_demo.py）
-     - terminal.py 已损坏，待修复或删除（见隐患 5）
+     - terminal.py 已损坏，待修复或删除（见隐患 5，隐患描述已同步更新）
 
  已知隐患（登记，修复后划掉）：
      1.【高】✅已修复（核对确认）：super.py 中 add_memory / retrieve_context 只 add_tool 一次（144-145 行），
@@ -161,8 +172,11 @@ OCR 改动：
      3.【高】✅已修复（核对确认）：_ans_executer 对 isinstance(result, Message) 的返回值原样返回，
        不再外包 Done，快任务错误能正确显示 Error。
      4.【高】✅已修复（核对确认）：json.loads 已包 try/except，解析失败回填错误 tool 消息让 LLM 自行修正。
-     5.【高】terminal.py 已坏：from Agent import agent（已不存在）；Tools.registry 装饰器内
-       def decorater(func: function) 的 function 未定义 → NameError，import 即崩。
+     5.【低】terminal.py 为遗留的独立入口脚本，已不再维护（正式入口是 super.py）：
+       它直接调用旧流程 Agent.agent()，与当前 super.py 的多 Agent 架构不一致；
+       并仍调用 init() 加载重模型，仅供早期调试，建议删除。
+       （原「from Agent import agent」与「def decorater(func: function) 的 function 未定义」
+       两处 NameError 已在代码演进中修正，剩余为逻辑过时问题。）
      6.【高】慢任务超限结果丢失，且残留 pending 带入下一轮对话。
      7.【中】✅已修复（核对确认）：Visal.py recognize_doc 中 pages = pages[:5] 硬截断为前 5 页。
      8.【中】✅已处理：Saver.add_memory 由 collection.add 改为 collection.upsert，
@@ -177,7 +191,7 @@ OCR 改动：
     13.【低】Agent.py 调试残留 print(TASKKKS...)；慢任务等待固定 sleep(10) 且烧 step。
     14.【低】super.py 直接读 os.environ["DSH_OPENAI_KEY"]，缺失时 KeyError 无友好提示。
     15.【低】硬编码：Saver 嵌入模型绝对路径、base_url、模型名（换机器必须改）。
-    16.【低】trail.py 是错误用法的忙循环实验代码（to_thread 传协程 + 无 await），运行即占满 CPU，勿运行。
+    16.【低】✅已清理：trail.py 已删除（原为错误用法的忙循环实验代码：to_thread 传协程 + 无 await）。
     17.【高】✅已处理（鉴权，新增问题）：Agent 会自己调用自己/其他专家互相甩锅——根因是
        schema 级过滤只能让 LLM「看不见」其他工具，但 bus.submit 执行时不校验调用者身份，
        专家一旦返回越权 tool_call 仍会被照单执行。已在 Agent.run_agent 增加执行层白名单校验：
