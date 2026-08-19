@@ -51,6 +51,8 @@ class Bus():
         self._task_ttl = 600.0                    # 已完成结果保留秒数，超时自动清理（防内存泄漏）
         self.slow_tasks = set()                   # 走 submit 的慢任务名集合
         self.reentrant_tasks = set()              # 可重入慢任务名集合（内部会再 submit，执行时不占用 semaphore）
+        self.dangerous_tools = set()              # 危险工具集合：执行前必须经用户 y/n 确认
+        self.event_callbacks = {}                 # event_name -> [async/sync callbacks]（常驻 Agent 等）
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
         # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
         self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
@@ -79,9 +81,42 @@ class Bus():
         self.slow_tasks.update(tasks)
         return None
 
-    def mark_reentrant(self,tasks:list[str] = []):
-        '''标记「内部还会再调用 submit」的慢任务（如专家）：执行时不占用并发名额，避免「持锁等锁」死锁'''
-        self.reentrant_tasks.update(tasks)
+    def mark_dangerous(self,tasks:list[str] = []):
+        '''标记危险工具：执行前必须通过 io_dialog 请求用户 y/n 确认。'''
+        self.dangerous_tools.update(tasks)
+        return None
+
+    def on(self, event_name: str, callback) -> None:
+        """注册事件回调（同步或异步均可）。常驻 Agent 用其接收唤醒事件。"""
+        self.event_callbacks.setdefault(event_name, []).append(callback)
+        return None
+
+    def off(self, event_name: str, callback) -> None:
+        """移除事件回调。"""
+        callbacks = self.event_callbacks.get(event_name)
+        if callbacks and callback in callbacks:
+            callbacks.remove(callback)
+        return None
+
+    async def publish(self, event_name: str, content: dict | None = None) -> None:
+        """在事件循环内发布事件：依次执行回调；同步回调直接调用，异步回调 await。"""
+        for cb in list(self.event_callbacks.get(event_name, [])):
+            try:
+                ret = cb(content or {})
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception as e:
+                print(f"[bus.publish] 事件 {event_name} 回调异常：{type(e).__name__}: {e}")
+        return None
+
+    def emit_threadsafe(self, event_name: str, content: dict | None = None, loop=None) -> None:
+        """从非事件循环线程（如 Listener 后台线程）安全发布事件。"""
+        if loop is None or loop.is_closed():
+            return None
+        try:
+            asyncio.run_coroutine_threadsafe(self.publish(event_name, content), loop)
+        except Exception as e:
+            print(f"[bus.emit_threadsafe] 事件 {event_name} 派发失败：{type(e).__name__}: {e}")
         return None
 
     def mark_reentrant(self,tasks:list[str] = []):
@@ -243,9 +278,23 @@ class Bus():
     async def _ans_executer(self,func_name:str,**kwargs):
         '''
         执行函数功能的工具，回传Message（异常直接返回 Error 消息，不在外面再包 Done）
-        执行函数功能的工具，回传Message（异常直接返回 Error 消息，不在外面再包 Done）
+        危险工具在进入 semaphore 前先请求用户 y/n 确认，避免 Agent 自主删除/替换记忆。
         '''
             # 通信采用总线，模块间不再需要回传，所有通信统一使用Message
+        if func_name in self.dangerous_tools:
+            answer = await self.io_dialog(
+                f"[安全确认] Agent 即将调用 {func_name}，参数：{kwargs}。是否执行？(y/n) "
+            )
+            if answer.strip().lower() not in ("y", "yes"):
+                return Message(**{
+                    'title': 'Error',
+                    'content': {
+                        'Task': func_name,
+                        'args': kwargs,
+                        'error': '用户取消操作',
+                        'error_type': 'CancelledByUser',
+                    },
+                })
         async with self.semaphore:
             try:
                 result = await self.tools.async_execute(func_name=func_name,**kwargs)

@@ -59,7 +59,9 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     单个Agent，支持异步
     本地OCR
     使用Tools对工具进行注册
-    一个未全面竣工的本地保存数据库
+    本地记忆数据库：add_memory / retrieve_context / delete_memory（ID+精确文本） / replace_memory（ID+旧文本），
+    terminal 中 /db delete <ID> <精确文本> 与 /db replace <ID> <旧文本> <新文本> 带确认操作；
+    Agent 调用 delete_memory / replace_memory 时，Bus 层会强制 y/n 确认。
 
     文件编辑工具 str_replace_editor（view/create/str_replace/insert，路径限制在项目目录内）
 
@@ -84,7 +86,8 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
 
     terminal.py 多Agent直接对话终端（重置版）：支持 /db 查看数据库、/agent 切换直接对话身份、
     /branch 对话分支（list/fork/new/switch/rm）、/cd 切换工作目录、/pwd 查看工作目录、
-    /whoami、/help、/exit；复用 super.py 的 register_common_tools / build_client / build_super_tools。
+    /whoami、/help、/exit；/agent 切换身份时只替换 system prompt，不删除已有对话历史；
+    复用 super.py 的 register_common_tools / build_client / build_super_tools。
 
     Setup.py 一键安装脚本：pip 走清华/阿里云/中科大镜像，HuggingFace 模型走 hf-mirror.com；
     默认安装依赖并下载 BGE 嵌入模型，--with-ocr 可预下载 Pix2Text OCR 模型，
@@ -224,7 +227,51 @@ OCR 改动：
        或 label 前缀；定理类环境共享 theorem 计数器，remark/Example 独立按 section 计数；
      - 每次写完/改完 .tex 后必须调用 check_latex，直到返回「语法检查通过」。
 
- Listener 音频转写（已实施，Faster-Whisper small/int8）：
+ 常驻 Agent（持续笔记，已实施三个阶段）：
+   目标：让常驻笔记 Agent 在后台长期运行，定时/事件驱动地读取 Listener 连续转写，
+   持续更新 LaTeX 笔记，实现「一边听一边写」。
+
+   已实现：
+     Phase 1 定时轮询：
+       - 新增 resident.py：ResidentAgent（同一 Agent 实例循环等待唤醒 -> run_agent -> 继续）
+         与 ResidentManager（start/stop/list/poke）。
+       - EXPERTS 新增 notetaker：唤醒后读取 Listener 新增转写，写入 latex_output/notes.tex，
+         排版遵守 view_theorem_style，写完 check_latex；不清空转写、不调用 io_dialog。
+       - Listener 新增游标式读取：get_listen_cursor() 与 get_listen_result(since_index=0)。
+       - terminal.py 新增 /resident start|stop|list|poke 命令。
+     Phase 2 事件驱动：
+       - Bus 新增 on/off/publish/emit_threadsafe 事件接口。
+       - Listener 每产生新转写条目，通过 attach_bus 的 loop 从后台线程发布
+         listener.transcript_updated；常驻 Agent 订阅后立即唤醒，无需等定时器。
+     Phase 3 Super 集成：
+       - resident.py 提供 register_resident_tools，给 Super 注册
+         start_resident_agent / stop_resident_agent / resident_status 三个工具；
+         super.py 与 terminal.py 都已接入 ResidentManager。
+
+   自动截断：
+     - 常驻消息：ResidentAgent 每轮后保留 system + 最近 40 条。
+     - Listener 转写：保留最近 200 条（可用环境变量 LISTENER_MAX_TRANSCRIPT_ENTRIES 调整），
+       采用与常驻消息相同的「只保留最近 N 条」策略；游标序号单调递增，清空/截断不倒退。
+
+   使用方式：
+     terminal.py 中：
+       /agent listener
+       start_listening 8
+       /resident start notetaker 30
+       /resident list
+       /resident poke notetaker 把刚才的内容归档
+       /resident stop notetaker
+     Super 中：
+       start_resident_agent(agent_type='notetaker', interval_sec=30)
+       resident_status()
+       stop_resident_agent(name='notetaker')
+
+   验收标准：
+     - 启动 Listener 连续监听和 notetaker 后，无需人工干预，notes.tex 每 30s 左右更新一次；
+     - Listener 转写事件会立即唤醒 notetaker，不等满 30s；
+     - /resident stop 或 stop_resident_agent 后不再更新；
+     - 用户仍可正常与 Super/其他 Agent 对话。
+
    目标：新增 Listener 专家/工具，将课堂音频（文件或麦克风）转写为文字，
    并把转写结果交给 Super/PassageWrite 做课堂记录。
 
@@ -339,6 +386,24 @@ OCR 改动：
        切换 Agent 会清空当前分支历史，分支 fork/new/switch/rm 管理多线对话。
      - Saver.py 新增 list_memories()：读取 chromadb 中全部记忆（id/text/metadata），
        供 terminal.py 的 /db 命令使用，不注册为 Agent 工具。
+     - Saver.py 新增 delete_memory(memory_id, exact_text) / replace_memory(memory_id, old_text, new_text, metadata)：
+       必须同时提供精确 ID 与完全一致的文本才可删除/替换，避免 Agent 幻觉按文本删除相似内容；
+       已注册为全局工具（Super 可见）。
+     - terminal.py /db 子命令：/db delete <ID> <精确文本>、/db replace <ID> <旧文本> <新文本>，
+       操作前有 y/n 确认。
+     - event_bus.Bus 新增 mark_dangerous 机制：delete_memory / replace_memory 被 Agent 通过
+       bus.submit 调用时，_ans_executer 会先 io_dialog 请求用户 y/n 确认，取消返回 CancelledByUser。
+     - 修复 Listener.__init__ 早期未初始化 _model_lock 导致 AttributeError 的问题。
+     - README 新增「常驻 Agent 计划（持续笔记，待确认）」：Phase 1 定时轮询 ResidentAgent /
+       notetaker 专家、Listener 游标读取、/resident 命令；Phase 2 事件驱动；Phase 3 Super 集成。
+     - 新增 resident.py：ResidentAgent + ResidentManager + register_resident_tools；
+       EXPERTS 新增 notetaker；terminal 新增 /resident 命令；Super 新增 start/stop/status 工具。
+     - event_bus.Bus 新增 on/off/publish/emit_threadsafe 事件接口；Listener 后台线程
+       通过 emit_threadsafe 发布 listener.transcript_updated 唤醒常驻 Agent。
+     - Listener 转写改为游标式 + 自动截断：get_listen_cursor/get_listen_result(since_index)，
+       仅保留最近 LISTENER_MAX_TRANSCRIPT_ENTRIES 条；常驻消息仅保留 system + 最近 40 条。
+     - 修复 ResidentManager.start 与 start_resident_agent 的 no running event loop：
+       start 改为 async，在事件循环内 create_task，Super 工具与终端命令都 await 调用。
      - super.py 抽出 register_common_tools() 与 build_client()，供 super.py 与 terminal.py 共用，
        避免两套 REPL 注册工具/创建 client 的逻辑漂移。
      - CLAUDE.md 同步更新 terminal.py 描述（直接对话多Agent终端）与 initer/Saver 相关说明。
@@ -355,6 +420,8 @@ OCR 改动：
      - Setup.py 增加 faster-whisper 依赖与 --with-listener/--listener-size 参数，
        可预下载 Systran/faster-whisper-small 到 ./models/faster-whisper-small。
      - terminal.py 新增 /cd <path> 切换工作目录、/pwd 查看当前工作目录。
+     - terminal.py /agent 改写：切换 Agent 只替换 system prompt，保留当前分支已有对话历史；
+       这样与其他 Agent 单独对话后，切回 Super/PassageWrite 可基于原历史进行记录。
      - listener.py 重构为 Listener 类，并接入 initer.init()：模型启动时加载一次、常驻内存；
         register_common_tools 改为注册实例方法。
      - 新增连续监听工具 start_listening / stop_listening / get_listen_result（sounddevice 麦克风，

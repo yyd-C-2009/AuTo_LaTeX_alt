@@ -64,7 +64,64 @@ class Saver:
         )
         print(f"已记忆 (ID: {doc_id[:8]}): {text[:20]}...")
 
-    # ---------- 5. 检索（保留原逻辑，但确保注入时去重） ----------
+    # ---------- 5. 删除/替换（仅按 ID，避免 Agent 幻觉按文本删除相似内容） ----------
+    def get_memory_by_id(self, memory_id: str) -> dict | None:
+        """按 ID 查询记忆，返回 {id,text,metadata} 或 None。"""
+        if not memory_id:
+            return None
+        try:
+            data = self.collection.get(ids=[memory_id], include=["documents", "metadatas"])
+        except Exception as e:
+            print(f"按 ID 查询失败：{type(e).__name__}: {e}")
+            return None
+        ids = data.get("ids") or []
+        if not ids:
+            return None
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        return {
+            "id": ids[0],
+            "text": docs[0] if docs else "",
+            "metadata": metas[0] if metas else None,
+        }
+
+    def delete_memory(self, memory_id: str, exact_text: str) -> str:
+        """按 ID + 精确文本 删除记忆。必须同时提供精确 ID 与完全一致的文本，避免误删相似内容。"""
+        old = self.get_memory_by_id(memory_id)
+        if old is None:
+            return f"删除失败：ID {memory_id} 不存在。"
+        if old.get("text", "") != exact_text:
+            return (
+                "删除失败：文本不匹配。必须同时提供精确 ID 与完全一致的文本才能删除；"
+                f"库中该 ID 对应文本为：{old.get('text', '')[:80]}"
+            )
+        self.collection.delete(ids=[memory_id])
+        return f"已删除记忆（ID: {memory_id[:8]}）：{old['text'][:50]}"
+
+    def replace_memory(self, memory_id: str, old_text: str, new_text: str, metadata: dict = None) -> str:
+        """按 ID + 旧文本精确匹配后替换：删除旧 ID，以新文本生成新 ID 写入（保持 ID=MD5(text)）。"""
+        old = self.get_memory_by_id(memory_id)
+        if old is None:
+            return f"替换失败：ID {memory_id} 不存在。"
+        if old.get("text", "") != old_text:
+            return (
+                "替换失败：旧文本不匹配。必须同时提供精确 ID 与完全一致的旧文本才能替换；"
+                f"库中该 ID 对应文本为：{old.get('text', '')[:80]}"
+            )
+        if not new_text or not new_text.strip():
+            return "替换失败：新文本不能为空。"
+        new_text = new_text.strip()
+        self.collection.delete(ids=[memory_id])
+        new_id = self.get_stable_id(new_text)
+        self.collection.upsert(
+            ids=[new_id],
+            documents=[new_text],
+            embeddings=[self.embed_text(new_text)],
+            metadatas=[metadata or old.get("metadata") or {"source": "user_input"}],
+        )
+        return f"已替换记忆：旧 ID {memory_id[:8]} -> 新 ID {new_id[:8]}；新文本：{new_text[:50]}"
+
+    # ---------- 6. 检索（保留原逻辑，但确保注入时去重） ----------
     def retrieve_context(self,query: str, top_k: int = 3) -> str:
         '''查询历史记忆'''
         if self.collection.count() == 0:
@@ -79,7 +136,7 @@ class Saver:
             return "\n---\n".join(unique_docs)
         return "No data"
 
-    # ---------- 6. 查看全部记忆（terminal.py 的 /db 命令使用，不注册为 Agent 工具） ----------
+    # ---------- 7. 查看全部记忆（terminal.py 的 /db 命令使用，不注册为 Agent 工具） ----------
     def list_memories(self) -> list:
         """列出数据库中的全部记忆，返回 [{"id":..., "text":..., "metadata":...}]。"""
         if self.collection.count() == 0:

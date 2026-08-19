@@ -10,6 +10,7 @@
       通过 start_listening / stop_listening / get_listen_result 工具访问。
 """
 
+import asyncio
 import os
 import queue
 import threading
@@ -34,6 +35,8 @@ class Listener:
 
         self.model = None
         self.load_error = None
+        self.model_path = None
+        self._model_lock = threading.Lock()  # 必须在 __init__ 早期初始化，后续转写方法会使用
         try:
             from faster_whisper import WhisperModel
 
@@ -59,8 +62,28 @@ class Listener:
         self._listen_thread: threading.Thread | None = None
         self._listen_stop = threading.Event()
         self._listen_queue: "queue.Queue" = queue.Queue()
-        self._listen_transcript: list[str] = []
+        self._listen_transcript: list[dict] = []
+        self._listen_seq = 0  # 单调递增的转写条目序号；clear 只清列表不清序号，保证游标不倒退
+        self._max_transcript_entries = max(1, int(os.environ.get("LISTENER_MAX_TRANSCRIPT_ENTRIES", "200")))
         self._transcript_lock = threading.Lock()
+        self.bus = None
+        self.loop = None
+
+    def attach_bus(self, bus, loop=None):
+        """绑定 Bus 与事件循环，用于从后台线程向常驻 Agent 发布转写更新事件。"""
+        self.bus = bus
+        self.loop = loop
+
+    def _notify_transcript(self, count: int):
+        if self.bus is None or self.loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.bus.publish("listener.transcript_updated", {"new_lines": count}),
+                self.loop,
+            )
+        except Exception as e:
+            print(f"[Listener] 转写事件通知失败：{type(e).__name__}: {e}")
 
     # ---------- 转写辅助 ----------
 
@@ -183,26 +206,44 @@ class Listener:
                     self._append_transcript_lines([f"[收尾转写异常] {type(e).__name__}: {e}"])
 
     def _append_transcript_lines(self, lines):
+        appended = 0
         for line in lines:
             line = (line or "").strip()
             if not line:
                 continue
             with self._transcript_lock:
-                self._listen_transcript.append(line)
+                self._listen_transcript.append({"seq": self._listen_seq, "text": line})
+                self._listen_seq += 1
+                appended += 1
+                # 自动截断：只保留最近 N 条，与常驻消息截断策略一致。
+                if len(self._listen_transcript) > self._max_transcript_entries:
+                    del self._listen_transcript[: len(self._listen_transcript) - self._max_transcript_entries]
             print(f"[Listener] {line[:120]}")
+        if appended:
+            self._notify_transcript(appended)
 
-    def _format_transcript(self, include_timestamps: bool) -> str:
+    def _format_transcript(self, include_timestamps: bool, since_index: int = 0) -> str:
         import re
 
         with self._transcript_lock:
             if not self._listen_transcript:
                 return "（暂无连续监听转写内容）"
-            lines = list(self._listen_transcript)
+            oldest_seq = self._listen_transcript[0]["seq"] if self._listen_transcript else 0
+            # 若请求的游标早于自动截断后仍保留的最早序号，只返回仍保留的内容，避免重复。
+            effective_since = max(since_index, oldest_seq)
+            entries = [e for e in self._listen_transcript if e["seq"] >= effective_since]
+        if not entries:
+            return "（无新增转写）"
+        lines = [e["text"] for e in entries]
         if include_timestamps:
-            return "\n".join(lines)
-        return "\n".join(
-            re.sub(r"^\[[0-9.]+-[0-9.]+\]\s*", "", line) for line in lines
-        )
+            text = "\n".join(lines)
+        else:
+            text = "\n".join(
+                re.sub(r"^\[[0-9.]+-[0-9.]+\]\s*", "", line) for line in lines
+            )
+        if since_index > 0 and oldest_seq > since_index:
+            text = "[提示] 部分早期转写已自动截断，以下为最近保留内容。\n" + text
+        return text
 
     def start_listening(
         self,
@@ -251,23 +292,29 @@ class Listener:
             return "连续监听停止超时，请稍后再试。"
         return self._format_transcript(include_timestamps)
 
+    def get_listen_cursor(self) -> str:
+        """返回当前转写游标（已产生的转写条目总数，单调递增）。常驻笔记 Agent 用它读取增量。"""
+        with self._transcript_lock:
+            return str(self._listen_seq)
+
     def get_listen_result(
         self,
         include_timestamps: Annotated[bool, "True=返回带时间戳文本；False=返回纯文本"] = True,
+        since_index: Annotated[int, "只返回序号 >= 该游标的转写；0=返回当前保留的全部"] = 0,
     ) -> str:
-        """查看当前累积的连续监听转写文本（只读，不会取走或清空内容）。"""
-        return self._format_transcript(include_timestamps)
+        """查看累积的连续监听转写文本（只读，不会取走或清空内容）。支持游标增量读取。"""
+        return self._format_transcript(include_timestamps, since_index)
 
     def clear_listen_result(
         self,
         confirm: Annotated[bool, "必须为 True 才会清空累积的连续监听转写"] = False,
     ) -> str:
-        """清空当前累积的连续监听转写文本（需 confirm=True 确认）。"""
+        """清空当前累积的连续监听转写文本（需 confirm=True 确认）。游标序号保持不变。"""
         if not confirm:
             return "clear_listen_result 需要 confirm=True 才会清空累积转写。"
         with self._transcript_lock:
             self._listen_transcript = []
-        return "已清空连续监听转写。"
+        return "已清空连续监听转写（游标序号保持不变）。"
 
 
 if __name__ == "__main__":

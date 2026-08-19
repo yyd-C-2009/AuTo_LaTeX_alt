@@ -244,17 +244,17 @@ class Agent:
                 print(out)
 
 
-class Agent_core():
-    '''
-    真实的工具调用入口（当前形态）：被 Super 通过 bus 路由调用，被动执行一个工具。
-    之后会新增独立的 `agent_exec` 作为「常驻挂起入口」（主动 while True 监听总线事件）。
-    '''
-    def __init__(self, read_only: bool = True):
-        self.tool_list = [str]
-        self.read_only: bool = read_only
-        self.allowed: bool = False
+# class Agent_core():
+#     '''
+#     真实的工具调用入口（当前形态）：被 Super 通过 bus 路由调用，被动执行一个工具。
+#     之后会新增独立的 `agent_exec` 作为「常驻挂起入口」（主动 while True 监听总线事件）。
+#     '''
+#     def __init__(self, read_only: bool = True):
+#         self.tool_list = [str]
+#         self.read_only: bool = read_only
+#         self.allowed: bool = False
 
-    # TODO: 常驻挂起入口（之后再做）——专家各自 while True 监听 bus，无事件时挂起
-    async def agent_exec(self, bus):
-        while self.allowed:
-            await bus.receive   # 占位：需实现 bus.receive（挂起等待事件的入口）
+#     # TODO: 常驻挂起入口（之后再做）——专家各自 while True 监听 bus，无事件时挂起
+#     async def agent_exec(self, bus):
+#         while self.allowed:
+#             await bus.receive   # 占位：需实现 bus.receive（挂起等待事件的入口）

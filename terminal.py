@@ -2,6 +2,8 @@
 
 提供系统指令：
     /db                 查看本地记忆数据库内容
+    /db delete <ID> <精确文本>     按 ID+精确文本删除记忆（带确认）
+    /db replace <ID> <旧文本> <新文本> 按 ID+旧文本替换记忆（带确认）
     /agent <name>       切换直接对话的 Agent 身份
     /agent              查看当前 Agent 与可用 Agent
     /agents             列出可用 Agent
@@ -10,23 +12,29 @@
     /branch new <name>  用当前 Agent 新建空白分支并切换
     /branch switch <name> 切换对话分支
     /branch rm <name>   删除分支
+    /resident start <agent> [interval] 启动常驻 Agent
+    /resident stop <name>               停止常驻 Agent
+    /resident list                      列出常驻 Agent
+    /resident poke <name> <指令>        手动唤醒常驻 Agent
     /cd <path>          切换当前工作目录
     /pwd                显示当前工作目录
     /whoami             查看当前分支与 Agent
     /help               显示本帮助
     /exit               退出
 
-普通文本会直接发送给当前 Agent；切换 Agent 会清空当前分支历史。
+普通文本会直接发送给当前 Agent；切换 Agent 只更换身份，不会删除当前分支历史。
 """
 
 import asyncio
 import copy
 import os
+import shlex
 
 from Agent import Agent
 from event_bus import Bus
 from Tools import Tools
 from initer import init
+from resident import ResidentManager, register_resident_tools
 from super import (
     SUPER_PROMPT,
     EXPERTS,
@@ -42,6 +50,8 @@ AVAILABLE_AGENTS = ["super"] + list(EXPERTS.keys())
 HELP_TEXT = """===== terminal.py 多Agent直接对话终端 =====
 系统指令（以 / 开头）：
   /db                  查看本地记忆数据库内容
+  /db delete <ID> <精确文本>      按 ID+精确文本删除记忆（带确认）
+  /db replace <ID> <旧文本> <新文本> 按 ID+旧文本替换记忆（带确认）
   /agent <name>        切换直接对话的 Agent 身份（super/math/mathwrite/passagewrite/draw/listener）
   /agent               查看当前 Agent 与可用 Agent
   /agents              列出可用 Agent
@@ -50,12 +60,16 @@ HELP_TEXT = """===== terminal.py 多Agent直接对话终端 =====
   /branch new <name>   用当前 Agent 新建空白分支并切换
   /branch switch <name> 切换对话分支
   /branch rm <name>    删除分支（不能删除当前分支）
+  /resident start <agent> [interval] 启动常驻 Agent
+  /resident stop <name>               停止常驻 Agent
+  /resident list                      列出常驻 Agent
+  /resident poke <name> <指令>        手动唤醒常驻 Agent
   /cd <path>           切换当前工作目录
   /pwd                 显示当前工作目录
   /whoami              查看当前分支与 Agent
   /help                显示本帮助
   /exit                退出
-普通文本会直接发送给当前 Agent；切换 Agent 会清空当前分支历史。
+普通文本会直接发送给当前 Agent；切换 Agent 只更换身份，不会删除当前分支历史。
 """
 
 
@@ -84,14 +98,18 @@ def fresh_messages(agent: str) -> list:
 
 
 class TerminalSession:
-    """维护当前 Agent、分支与对话历史。"""
+    """维护当前 Agent、分支与对话历史。
 
-    def __init__(self, bus: Bus, client, agent_memory):
+    当前分支的实时消息统一放在 self.super_history 中（即使当前 Agent 不是 Super），
+    这样 build_super_tools 闭包引用的 list 始终是当前分支的实时消息；分支切换时保存/恢复
+    该 list 的深拷贝快照。切换 Agent 只替换 system prompt，不删除已有 user/assistant 历史。
+    """
+
+    def __init__(self, bus: Bus, client, agent_memory, resident_manager=None):
         self.bus = bus
         self.client = client
         self.agent_memory = agent_memory
-        # Super 专家工具的回传闭包需要引用一个稳定的 list，因此 super 分支的
-        # 实时消息统一使用 self.super_history，分支中保存其深拷贝快照。
+        self.resident_manager = resident_manager
         self.super_history = fresh_messages("super")
         self.branches = {
             "main": {"agent": "super", "messages": copy.deepcopy(self.super_history)}
@@ -106,11 +124,15 @@ class TerminalSession:
 
     # ---------- 分支/身份管理 ----------
 
-    def save_active(self):
-        if self.agent == "super":
-            self.branches[self.active_branch]["messages"] = copy.deepcopy(self.super_history)
+    def _set_agent_prompt(self, agent: str):
+        """替换当前消息列表的 system prompt 为指定 Agent 的 prompt；保留其余历史。"""
+        if self.super_history and self.super_history[0].get("role") == "system":
+            self.super_history[0] = {"role": "system", "content": agent_prompt(agent)}
         else:
-            self.branches[self.active_branch]["messages"] = self.active_messages
+            self.super_history.insert(0, {"role": "system", "content": agent_prompt(agent)})
+
+    def save_active(self):
+        self.branches[self.active_branch]["messages"] = copy.deepcopy(self.super_history)
 
     def switch_branch(self, name: str) -> tuple[bool, str]:
         if name not in self.branches:
@@ -119,11 +141,8 @@ class TerminalSession:
             return True, f"已在分支 {name}（agent={self.agent}）"
         self.save_active()
         self.active_branch = name
-        if self.agent == "super":
-            self.super_history[:] = copy.deepcopy(self.branches[name]["messages"])
-            self.active_messages = self.super_history
-        else:
-            self.active_messages = self.branches[name]["messages"]
+        self.super_history[:] = copy.deepcopy(self.branches[name]["messages"])
+        self.active_messages = self.super_history
         self.runner = Agent(self.bus)  # 分支切换后重置 Agent 状态（pending/delayed_results）
         return True, f"已切换到分支 {name}（agent={self.agent}）"
 
@@ -153,18 +172,15 @@ class TerminalSession:
     def switch_agent(self, agent: str) -> tuple[bool, str]:
         if agent not in AVAILABLE_AGENTS:
             return False, f"未知 Agent {agent!r}；可用：{', '.join(AVAILABLE_AGENTS)}"
+        # 切换身份只替换 system prompt，保留已有对话历史，绝不删除。
         self.branches[self.active_branch]["agent"] = agent
-        if agent == "super":
-            self.super_history[:] = fresh_messages("super")
-            self.active_messages = self.super_history
-            self.branches[self.active_branch]["messages"] = copy.deepcopy(self.super_history)
-        else:
-            self.active_messages = fresh_messages(agent)
-            self.branches[self.active_branch]["messages"] = self.active_messages
+        self._set_agent_prompt(agent)
+        self.active_messages = self.super_history
+        self.branches[self.active_branch]["messages"] = copy.deepcopy(self.super_history)
         self.runner = Agent(self.bus)  # 身份切换后重置 Agent 状态（pending/delayed_results）
         return True, (
-            f"已切换到直接对话 Agent：{agent}（当前分支 {self.active_branch} 的历史已清空；"
-            "如需保留旧对话，请先 /branch fork <name> 保存）"
+            f"已切换到直接对话 Agent：{agent}（当前分支 {self.active_branch} 的对话历史已保留；"
+            "可直接让 Super/PassageWrite 基于上面的历史进行记录）"
         )
 
     # ---------- 系统指令 ----------
@@ -180,6 +196,44 @@ class TerminalSession:
             meta = mem.get("metadata")
             suffix = f" | meta={meta}" if meta else ""
             await self.bus.io_print(f"{i}. [{mem.get('id', '')[:8]}] {text}{suffix}")
+
+    async def cmd_db_delete(self, memory_id: str, exact_text: str):
+        old = await asyncio.to_thread(self.agent_memory.get_memory_by_id, memory_id)
+        if old is None:
+            await self.bus.io_print(f"删除失败：ID {memory_id} 不存在。")
+            return
+        if old.get("text", "") != exact_text:
+            await self.bus.io_print(f"删除失败：文本不匹配。\n库中该 ID 对应文本：{old.get('text', '')[:120]}")
+            return
+        await self.bus.io_print(f"待删除：{old['text'][:100]}")
+        confirm = await self.bus.io_dialog(f"确认删除 ID {memory_id}？(y/n) ")
+        if confirm.strip().lower() not in ("y", "yes"):
+            await self.bus.io_print("已取消删除。")
+            return
+        result = await asyncio.to_thread(self.agent_memory.delete_memory, memory_id, exact_text)
+        await self.bus.io_print(result)
+
+    async def cmd_db_replace(self, memory_id: str, old_text: str, new_text: str):
+        old = await asyncio.to_thread(self.agent_memory.get_memory_by_id, memory_id)
+        if old is None:
+            await self.bus.io_print(f"替换失败：ID {memory_id} 不存在。")
+            return
+        if old.get("text", "") != old_text:
+            await self.bus.io_print(f"替换失败：旧文本不匹配。\n库中该 ID 对应文本：{old.get('text', '')[:120]}")
+            return
+        if not new_text.strip():
+            await self.bus.io_print("替换失败：新文本不能为空。")
+            return
+        await self.bus.io_print(f"旧文本：{old['text'][:100]}")
+        await self.bus.io_print(f"新文本：{new_text[:100]}")
+        confirm = await self.bus.io_dialog(f"确认替换 ID {memory_id}？(y/n) ")
+        if confirm.strip().lower() not in ("y", "yes"):
+            await self.bus.io_print("已取消替换。")
+            return
+        result = await asyncio.to_thread(
+            self.agent_memory.replace_memory, memory_id, old_text, new_text.strip()
+        )
+        await self.bus.io_print(result)
 
     async def cmd_branch_list(self):
         await self.bus.io_print(f"当前分支：{self.active_branch}（agent={self.agent}）")
@@ -200,6 +254,28 @@ class TerminalSession:
             return
         if cmdline in ("db", "memories"):
             await self.cmd_db()
+            return
+        if cmdline.startswith("db delete "):
+            try:
+                parts = shlex.split(cmdline)
+            except ValueError as e:
+                await self.bus.io_print(f"参数解析失败：{e}")
+                return
+            if len(parts) < 4:
+                await self.bus.io_print("用法：/db delete <ID> <精确文本>")
+                return
+            await self.cmd_db_delete(parts[2], " ".join(parts[3:]))
+            return
+        if cmdline.startswith("db replace "):
+            try:
+                parts = shlex.split(cmdline)
+            except ValueError as e:
+                await self.bus.io_print(f"参数解析失败：{e}")
+                return
+            if len(parts) < 5:
+                await self.bus.io_print("用法：/db replace <ID> <旧文本> <新文本>（文本含空格请加引号）")
+                return
+            await self.cmd_db_replace(parts[2], parts[3], " ".join(parts[4:]))
             return
         if cmdline == "agent":
             await self.bus.io_print(
@@ -231,6 +307,46 @@ class TerminalSession:
             return
         if cmdline == "whoami":
             await self.bus.io_print(f"当前分支：{self.active_branch}，当前 Agent：{self.agent}")
+            return
+        if cmdline in ("resident", "resident list"):
+            if not self.resident_manager:
+                await self.bus.io_print("常驻 Agent 管理器未初始化。")
+                return
+            await self.bus.io_print(self.resident_manager.list_status())
+            return
+        if cmdline.startswith("resident start "):
+            if not self.resident_manager:
+                await self.bus.io_print("常驻 Agent 管理器未初始化。")
+                return
+            rest = cmdline[len("resident start "):].strip()
+            parts = rest.split(maxsplit=1)
+            agent_type = parts[0].strip()
+            interval = 30.0
+            if len(parts) == 2:
+                try:
+                    interval = float(parts[1].strip())
+                except ValueError:
+                    await self.bus.io_print("用法：/resident start <agent_type> [interval_sec]")
+                    return
+            await self.bus.io_print(await self.resident_manager.start(agent_type, interval))
+            return
+        if cmdline.startswith("resident stop "):
+            if not self.resident_manager:
+                await self.bus.io_print("常驻 Agent 管理器未初始化。")
+                return
+            name = cmdline[len("resident stop "):].strip()
+            await self.bus.io_print(await self.resident_manager.stop(name))
+            return
+        if cmdline.startswith("resident poke "):
+            if not self.resident_manager:
+                await self.bus.io_print("常驻 Agent 管理器未初始化。")
+                return
+            rest = cmdline[len("resident poke "):].strip()
+            parts = rest.split(maxsplit=1)
+            if len(parts) != 2:
+                await self.bus.io_print("用法：/resident poke <name> <指令>")
+                return
+            await self.bus.io_print(self.resident_manager.poke(parts[0], parts[1]))
             return
         if cmdline in ("branch", "branch list"):
             await self.cmd_branch_list()
@@ -277,8 +393,18 @@ async def main():
     register_common_tools(tools, data)
     client = build_client()
     bus = Bus(tools, max_concurrency=4)
+    bus.mark_dangerous(["delete_memory", "replace_memory"])  # Agent 调用这两个工具前必须 y/n 确认
 
-    session = TerminalSession(bus, client, data["agent_memory"])
+    # Listener 事件桥：后台转写线程通过 bus.emit_threadsafe 唤醒常驻 Agent。
+    data["agent_listener"].attach_bus(bus, asyncio.get_running_loop())
+    resident_manager = ResidentManager(
+        bus, client, MODEL,
+        agent_specs=EXPERTS,
+        transcript_provider=data["agent_listener"],
+    )
+    register_resident_tools(bus.tools, resident_manager)
+
+    session = TerminalSession(bus, client, data["agent_memory"], resident_manager)
     # 注册专家工具（math_expert 等），让 Super 身份也能路由专家。
     # 传入 session.super_history 作为稳定的对话历史引用：Super 切换分支时通过
     # super_history[:] 原地更新，专家工具始终读取当前 Super 分支的对话。

@@ -11,6 +11,7 @@ from Tools import Tools
 from initer import init
 from str_replace_editor import str_replace_editor
 from built_in_tool import web_search, web_fetch,get_weather
+from resident import ResidentManager, register_resident_tools
 
 MODEL = "deepseek-v4-flash-ascend"
 BASE_URL = "https://api.llm.ustc.edu.cn/v1" # https://api.llm.ustc.edu.cn/v1 or https://api.deepseek.com
@@ -24,6 +25,8 @@ SUPER_PROMPT = (
     "判断哪些功能值得在之后被集成为新工具, 并调用 add_memory 保存这份复盘。"
     "同时, 诊断当前对于各个专家的提示词是否合理, 是否需要调整；"
     "需要查看各专家当前提示词和工具白名单时, 调用 view_expert_prompts。"
+    "需要持续课堂笔记时，可调用 start_resident_agent(agent_type='notetaker', interval_sec=30)；"
+    "用 stop_resident_agent 停止，resident_status 查看状态。"
     "可用专家: math_expert(数学判断/讨论)、mathwrite_expert(LaTeX转写)、"
     "passagewrite_expert(篇章结构与总结)、draw_expert(Tikz绘图)、listener_expert(音频转写)。"
     "注意: 各专家每次被调用都是无状态的, 不会记住你之前的对话或它们之前的回答；"
@@ -79,6 +82,13 @@ EXPERTS = {
         "不修改任何文件；转写时优先使用 auto 自动检测语言，返回结果保留时间戳，"
         "并把完整转写文本交给 Super/PassageWrite 做课堂记录总结。",
         ["transcribe_audio", "start_listening", "stop_listening", "get_listen_result", "clear_listen_result"],
+    ),
+    "notetaker": (
+        "你是Notetaker专家: 常驻课堂笔记 Agent。每次被唤醒时，先读取 Listener 的最新转写（get_listen_result），"
+        "把新增内容整理成重点突出的 LaTeX 笔记，写入/更新 latex_output/notes.tex；"
+        "定理/公式排版必须遵守 view_theorem_style 规范，写完必须 check_latex 直到通过。你只追加/更新笔记，"
+        "不要清空 Listener 转写，不要调用 io_dialog，不要删除其他文件。",
+        ["get_listen_result", "get_listen_cursor", "write_latex", "str_replace_editor", "check_latex", "view_theorem_style", "retrieve_context"],
     ),
 }
 
@@ -284,6 +294,8 @@ def register_common_tools(tools: Tools, data: dict) -> Tools:
     """把除「专家工具」以外的公共工具注册到 tools（供 super.py 与 terminal.py 共用）。"""
     tools.add_tool(data["agent_memory"].add_memory)
     tools.add_tool(data["agent_memory"].retrieve_context)
+    tools.add_tool(data["agent_memory"].delete_memory, time_out=5)
+    tools.add_tool(data["agent_memory"].replace_memory, time_out=10)
     tools.add_tool(data["agent_visal"].recognize_doc, time_out=180)
     tools.add_tool(write_latex, time_out=10)
     tools.add_tool(check_tikz, time_out=90)
@@ -300,6 +312,7 @@ def register_common_tools(tools: Tools, data: dict) -> Tools:
     tools.add_tool(listener.start_listening, time_out=10)
     tools.add_tool(listener.stop_listening, time_out=30)
     tools.add_tool(listener.get_listen_result, time_out=5)
+    tools.add_tool(listener.get_listen_cursor, time_out=5)
     tools.add_tool(listener.clear_listen_result, time_out=5)
     return tools
 
@@ -323,6 +336,7 @@ async def main():
 
     # 总线 + 专家工具 (专家标记为 slow_task)
     bus = Bus(tools, max_concurrency=4)
+    bus.mark_dangerous(["delete_memory", "replace_memory"])  # Agent 调用这两个工具前必须 y/n 确认
 
     # Super 自己也是一个 Agent (只负责路由, 不负责具体读写)
     super_agent = Agent(bus)
@@ -333,6 +347,13 @@ async def main():
     build_super_tools(bus, client, messages)
     # 记忆工具已在上方注册 (见 tools.add_tool(add_memory/retrieve_context)) , Super 复盘直接使用；
     # 切勿重复 add_tool: 同名工具会重复出现在 schema 中 (历史 bug, 已修复)
+
+    # Listener 事件桥：后台转写线程通过 bus.emit_threadsafe 唤醒常驻 Agent。
+    data["agent_listener"].attach_bus(bus, asyncio.get_running_loop())
+    # 常驻 Agent 管理器：Super 可用 start_resident_agent / stop_resident_agent / resident_status。
+    resident_manager = ResidentManager(bus, client, MODEL, agent_specs=EXPERTS,
+                                       transcript_provider=data["agent_listener"])
+    register_resident_tools(tools, resident_manager)
 
     await bus.io_print("===== Super 多Agent系统启动 (输入 \\exit() 退出) =====")
     while True:
