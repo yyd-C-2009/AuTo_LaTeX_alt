@@ -275,7 +275,7 @@ OCR 改动：
    目标：新增 Listener 专家/工具，将课堂音频（文件或麦克风）转写为文字，
    并把转写结果交给 Super/PassageWrite 做课堂记录。
 
-   模型选型（已确认：Faster-Whisper small/int8/CPU）：
+   模型选型（已确认：Faster-Whisper medium/int8/CPU）：
      A. Faster-Whisper（推荐）：faster-whisper + CTranslate2，CPU 可跑，支持中英、
         时间戳、VAD。模型走 HF 镜像下载：tiny/base/small/medium/large-v3；
         中文课堂建议 small（约 484MB，均衡）或 medium（约 1.5GB，更准）。
@@ -290,7 +290,7 @@ OCR 改动：
         在 initer.init() 中创建一次，Faster-Whisper 模型加载后常驻内存，不重复卸载；
         register_common_tools 注册该实例的 bound methods。
      2. 单文件转写 transcribe_audio(audio_path, language="auto", task="transcribe") -> str，
-        返回带时间戳文本；模型目录支持 LISTENER_MODEL_DIR，默认 ./models/faster-whisper-small；
+        返回带时间戳文本；模型目录支持 LISTENER_MODEL_DIR，默认 ./models/faster-whisper-medium；
         目录不存在时不再自动联网下载（避免 HF 网络超时拖死启动），而是记录 load_error
         并提示运行 Setup.py --with-listener --listener-source modelscope 下载。
      3. 连续监听（依赖 sounddevice）：
@@ -299,6 +299,13 @@ OCR 改动：
          - get_listen_result(include_timestamps=True)：只读查看当前累积转写，不会取走/清空内容；
          - stop_listening(include_timestamps=True)：停止监听并返回累积转写（不清空）；
          - clear_listen_result(confirm=True)：显式清空累积转写。
+     3.1 转写质量优化（已实施）：
+         - 默认语言 LISTENER_LANGUAGE=zh，避免噪声下自动检测成外语；
+         - initial_prompt 默认改为空，避免 Whisper 把提示词回显成“请问是什么中文课堂录音？”；
+         - condition_on_previous_text=False，减少循环幻觉；
+         - VAD 参数 min_silence_duration_ms=500 / speech_pad_ms=200；
+         - 低质量片段过滤：no_speech_prob>0.4 / avg_logprob<-0.6 / compression_ratio>2.0 丢弃；
+         - 连续监听新增 RMS 能量门槛（LISTENER_RMS_THRESHOLD，默认 0.01）：静音/噪声段直接跳过。
      4. Setup.py 已加入 faster-whisper / sounddevice / numpy 依赖，并新增
         --with-listener / --listener-size / --listener-source 参数；默认从 ModelScope
         下载 pengzhendong/faster-whisper-<size> 到 ./models/faster-whisper-<size>，
@@ -404,6 +411,8 @@ OCR 改动：
        仅保留最近 LISTENER_MAX_TRANSCRIPT_ENTRIES 条；常驻消息仅保留 system + 最近 40 条。
      - 修复 ResidentManager.start 与 start_resident_agent 的 no running event loop：
        start 改为 async，在事件循环内 create_task，Super 工具与终端命令都 await 调用。
+     - Listener 转写质量优化：默认中文、关闭上下文循环、VAD 参数强化、低质量片段过滤；
+       进一步将 initial_prompt 默认改为空并增加 RMS 静音门槛，抑制 Whisper 幻觉。
      - super.py 抽出 register_common_tools() 与 build_client()，供 super.py 与 terminal.py 共用，
        避免两套 REPL 注册工具/创建 client 的逻辑漂移。
      - CLAUDE.md 同步更新 terminal.py 描述（直接对话多Agent终端）与 initer/Saver 相关说明。
@@ -412,13 +421,13 @@ OCR 改动：
      - Saver.py load_embedder 改为按「显式参数 > BGE_MODEL_DIR > ./models/bge-base-zh-v1.5 >
        旧机器路径」顺序查找，新机器无需改代码即可使用 Setup.py 下载的模型。
      - Visal.py 在导入 pix2text 前默认设置 HF_ENDPOINT=https://hf-mirror.com（不覆盖已有值）。
-     - README 新增 Listener 实现方案，经确认后已实施（Faster-Whisper small/int8/CPU）。
+     - README 新增 Listener 实现方案，经确认后已实施（Faster-Whisper medium/int8/CPU）。
      - 新增 listener.py：Faster-Whisper 本地音频转写工具 transcribe_audio；模型懒加载，
-       默认 small/int8/CPU，支持 LISTENER_MODEL_DIR/LISTENER_MODEL_SIZE/HF_ENDPOINT 覆盖。
+       默认 medium/int8/CPU，支持 LISTENER_MODEL_DIR/LISTENER_MODEL_SIZE/HF_ENDPOINT 覆盖。
      - super.py EXPERTS 增加 listener 专家，SUPER_PROMPT 增加 listener_expert；
        register_common_tools 注册 transcribe_audio；listener_expert 超时 1800s。
      - Setup.py 增加 faster-whisper 依赖与 --with-listener/--listener-size 参数，
-       可预下载 Systran/faster-whisper-small 到 ./models/faster-whisper-small。
+       可预下载 Systran/faster-whisper-medium 到 ./models/faster-whisper-medium（默认）。
      - terminal.py 新增 /cd <path> 切换工作目录、/pwd 查看当前工作目录。
      - terminal.py /agent 改写：切换 Agent 只替换 system prompt，保留当前分支已有对话历史；
        这样与其他 Agent 单独对话后，切回 Super/PassageWrite 可基于原历史进行记录。

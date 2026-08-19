@@ -150,7 +150,7 @@ def _download_modelscope_model(repo_id: str, model_dir: Path) -> None:
     print(f"ModelScope 模型已下载至：{model_dir}")
 
 
-def download_listener_model(size: str = "small", source: str = "modelscope") -> None:
+def download_listener_model(size: str = "medium", source: str = "modelscope") -> None:
     """下载 Faster-Whisper 模型到 ./models/faster-whisper-<size>，供 Listener 使用。"""
     model_dir = ROOT / "models" / f"faster-whisper-{size}"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -191,7 +191,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AuTo_LaTeX 系统一键安装脚本")
     parser.add_argument("--with-ocr", action="store_true", help="额外预下载 Pix2Text OCR 模型（较慢）")
     parser.add_argument("--with-listener", action="store_true", help="预下载 Listener 的 Faster-Whisper 模型")
-    parser.add_argument("--listener-size", default=os.environ.get("LISTENER_MODEL_SIZE", "small"),
+    parser.add_argument("--listener-size", default=os.environ.get("LISTENER_MODEL_SIZE", "medium"),
                         help="Faster-Whisper 模型规模：tiny/base/small/medium/large-v3（默认 small）")
     parser.add_argument("--listener-source", choices=["modelscope", "hf"],
                         default=os.environ.get("LISTENER_DOWNLOAD_SOURCE", "modelscope"),

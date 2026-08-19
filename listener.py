@@ -3,8 +3,8 @@
 设计约定：
     - 与 Visal 一致：Listener 是一个长生命周期对象，在 init() 中创建一次，模型加载后常驻内存。
     - 模型默认 Faster-Whisper small（int8, CPU）。可用环境变量覆盖：
-        LISTENER_MODEL_SIZE  模型规模（默认 small）
-        LISTENER_MODEL_DIR   本地模型目录（默认 ./models/faster-whisper-small）
+        LISTENER_MODEL_SIZE  模型规模（默认 medium）
+        LISTENER_MODEL_DIR   本地模型目录（默认 ./models/faster-whisper-medium）
         HF_ENDPOINT          HuggingFace 镜像（默认 https://hf-mirror.com）
     - 连续监听依赖 sounddevice（麦克风），在后台线程中按段转写，转写结果累积在实例中，
       通过 start_listening / stop_listening / get_listen_result 工具访问。
@@ -26,7 +26,7 @@ class Listener:
     def __init__(self, model_size: str | None = None, model_dir: str | None = None,
                  device: str = "cpu", compute_type: str = "int8"):
         os.environ.setdefault("HF_ENDPOINT", HF_MIRROR)
-        self.model_size = model_size or os.environ.get("LISTENER_MODEL_SIZE", "small")
+        self.model_size = model_size or os.environ.get("LISTENER_MODEL_SIZE", "medium")
         self.model_dir = (
             model_dir
             or os.environ.get("LISTENER_MODEL_DIR")
@@ -36,6 +36,8 @@ class Listener:
         self.model = None
         self.load_error = None
         self.model_path = None
+        self.language = os.environ.get("LISTENER_LANGUAGE", "zh")  # 默认中文，避免噪声下语言检测乱跳
+        self.initial_prompt = os.environ.get("LISTENER_INITIAL_PROMPT", "")  # 默认不放中文提示词，避免被 Whisper 当作幻觉回显
         self._model_lock = threading.Lock()  # 必须在 __init__ 早期初始化，后续转写方法会使用
         try:
             from faster_whisper import WhisperModel
@@ -65,6 +67,7 @@ class Listener:
         self._listen_transcript: list[dict] = []
         self._listen_seq = 0  # 单调递增的转写条目序号；clear 只清列表不清序号，保证游标不倒退
         self._max_transcript_entries = max(1, int(os.environ.get("LISTENER_MAX_TRANSCRIPT_ENTRIES", "200")))
+        self._rms_threshold = float(os.environ.get("LISTENER_RMS_THRESHOLD", "0.01"))
         self._transcript_lock = threading.Lock()
         self.bus = None
         self.loop = None
@@ -87,14 +90,33 @@ class Listener:
 
     # ---------- 转写辅助 ----------
 
+    @staticmethod
+    def _is_low_quality(seg) -> bool:
+        """过滤 Whisper 在噪声/静音下产生的幻觉片段。
+        返回 True 表示该片段质量低，应丢弃。
+        """
+        no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
+        avg_logprob = getattr(seg, "avg_logprob", 0.0)
+        compression_ratio = getattr(seg, "compression_ratio", 0.0)
+        # no_speech_prob 越高越可能是非语音；avg_logprob 越低越不可信；
+        # compression_ratio 过高通常表示重复/异常文本。
+        if no_speech_prob > 0.4:
+            return True
+        if avg_logprob < -0.6:
+            return True
+        if compression_ratio > 2.0:
+            return True
+        return False
+
     def _segments_to_lines(self, segments) -> list[str]:
         lines = []
         for seg in segments:
             start = getattr(seg, "start", 0.0)
             end = getattr(seg, "end", 0.0)
             text = (seg.text or "").strip()
-            if text:
-                lines.append(f"[{start:.1f}-{end:.1f}] {text}")
+            if not text or self._is_low_quality(seg):
+                continue
+            lines.append(f"[{start:.1f}-{end:.1f}] {text}")
         return lines
 
     def _segments_to_text(self, segments, info, title: str = "音频") -> str:
@@ -117,13 +139,40 @@ class Listener:
         try:
             with self._model_lock:
                 segments, info = self.model.transcribe(
-                    arr, language=None, task="transcribe", vad_filter=True, beam_size=5
+                    arr,
+                    language=self.language,
+                    task="transcribe",
+                    initial_prompt=self.initial_prompt,
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+                    no_speech_threshold=0.4,
+                    logprob_threshold=-0.6,
+                    compression_ratio_threshold=2.0,
+                    beam_size=5,
                 )
         except TypeError:
-            with self._model_lock:
-                segments, info = self.model.transcribe(
-                    arr, language=None, task="transcribe", beam_size=5
-                )
+            # 旧版 faster-whisper 可能不支持 vad_parameters，降级重试
+            try:
+                with self._model_lock:
+                    segments, info = self.model.transcribe(
+                        arr,
+                        language=self.language,
+                        task="transcribe",
+                        initial_prompt=self.initial_prompt,
+                        condition_on_previous_text=False,
+                        vad_filter=True,
+                        beam_size=5,
+                    )
+            except TypeError:
+                with self._model_lock:
+                    segments, info = self.model.transcribe(
+                        arr,
+                        language=self.language,
+                        task="transcribe",
+                        condition_on_previous_text=False,
+                        beam_size=5,
+                    )
         return self._segments_to_lines(segments)
 
     # ---------- 单文件转写工具 ----------
@@ -144,19 +193,47 @@ class Listener:
         if not audio_path or not os.path.isfile(audio_path):
             return f"错误: 音频文件不存在 {audio_path}"
 
-        lang = None if language in ("auto", "") else language
+        # auto 时也使用实例默认语言（默认 zh），避免噪声下自动检测乱跳
+        lang = self.language if language in ("auto", "") else language
         use_task = task if task in ("transcribe", "translate") else "transcribe"
 
         try:
             with self._model_lock:
                 segments, info = self.model.transcribe(
-                    audio_path, language=lang, task=use_task, vad_filter=True, beam_size=5
+                    audio_path,
+                    language=lang,
+                    task=use_task,
+                    initial_prompt=self.initial_prompt,
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+                    no_speech_threshold=0.4,
+                    logprob_threshold=-0.6,
+                    compression_ratio_threshold=2.0,
+                    beam_size=5,
                 )
         except TypeError:
-            with self._model_lock:
-                segments, info = self.model.transcribe(
-                    audio_path, language=lang, task=use_task, beam_size=5
-                )
+            # 旧版 faster-whisper 可能不支持 vad_parameters，降级重试
+            try:
+                with self._model_lock:
+                    segments, info = self.model.transcribe(
+                        audio_path,
+                        language=lang,
+                        task=use_task,
+                        initial_prompt=self.initial_prompt,
+                        condition_on_previous_text=False,
+                        vad_filter=True,
+                        beam_size=5,
+                    )
+            except TypeError:
+                with self._model_lock:
+                    segments, info = self.model.transcribe(
+                        audio_path,
+                        language=lang,
+                        task=use_task,
+                        condition_on_previous_text=False,
+                        beam_size=5,
+                    )
         except Exception as e:
             return f"转写失败：{type(e).__name__}: {e}"
 
@@ -190,6 +267,12 @@ class Listener:
                     if buffered_sec >= segment_duration:
                         audio = np.concatenate(buffer)
                         buffer, buffered_sec = [], 0.0
+                        arr = np.asarray(audio, dtype=np.float32).squeeze()
+                        if arr.ndim == 2:
+                            arr = arr.mean(axis=1)
+                        # 能量过低视为静音/噪声，直接跳过，避免 Whisper 对无语音段产生幻觉
+                        if arr.size == 0 or float(np.sqrt(np.mean(arr ** 2))) < self._rms_threshold:
+                            continue
                         lines = self._transcribe_array(audio)
                         self._append_transcript_lines(lines)
         except Exception as e:
