@@ -53,7 +53,7 @@ class Saver:
 
     # ---------- 4. 写入记忆（确定性ID防止重复脏数据） ----------
     def add_memory(self,text: str, metadata: dict = None):
-        '''写入记忆，使用前必须向user确认文本内容，避免误写'''
+        '''写入记忆，使用前必须先查询是否已存在相似记忆，否则会被拦截'''
         doc_id = self.get_stable_id(text)  # 确定性ID
         # 同一文本（相同MD5 ID）重复写入时用 upsert 覆盖，避免 ChromaDB DuplicateIDError
         self.collection.upsert(

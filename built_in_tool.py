@@ -1,13 +1,13 @@
 """内置工具：联网功能。
 
 提供的联网能力（均为同步阻塞函数，交由 Tools.async_execute 的 to_thread 分支调度）：
-    - web_search(query, max_results) : 网页搜索（DuckDuckGo HTML 端点，无需 API key）
+    - web_search(query, max_results) : 网页搜索（Bing RSS 端点，无需 API key；DuckDuckGo 不可达时替代）
     - web_fetch(url)                  : 抓取网页转纯文本
 
 设计约定：
     - 返回类型为 str（与 super.py 中 write_latex / check_tikz 一致）。
     - 全部 try/except 兜底出错信息，避免因网络异常把整个 Agent 任务炸掉。
-    - 依赖仅标准库（urllib / html.parser），不引入 requests/aiohttp 等额外依赖。
+    - 依赖仅标准库（urllib / html.parser / xml.etree），不引入 requests/aiohttp 等额外依赖。
 """
 
 import urllib.parse
@@ -15,6 +15,7 @@ import urllib.request
 import json
 import html
 import re
+import xml.etree.ElementTree as ET
 from typing import Annotated
 from html.parser import HTMLParser
 
@@ -66,46 +67,51 @@ def _open(url: str, data: bytes | None = None, timeout: float = 20.0):
         data=data,
         headers={
             "User-Agent": _USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
     )
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _strip_html(text: str | None) -> str:
+    """把可能含 HTML 标签的文本清洗为纯文本。"""
+    if not text:
+        return ""
+    return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+
+
 def web_search(
     query: Annotated[str, "搜索关键词"],
     max_results: Annotated[int, "最多返回的结果条数"] = 5,
 ) -> str:
-    """联网搜索页面（使用 DuckDuckGo HTML 端点，无需 API key），返回摘要列表。"""
+    """联网搜索（使用 Bing RSS 端点，无需 API key），返回摘要列表。"""
     try:
+        if not query or not query.strip():
+            return "搜索关键词不能为空"
+        query = query.strip()
         if max_results < 1:
             max_results = 1
         if max_results > 20:
             max_results = 20
-        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-        body = _open(url, data=f"q={urllib.parse.quote(query)}".encode(), timeout=25).read().decode("utf-8", "ignore")
-
-        links = re.findall(r'class="result__a"[^>]*>(.*?)</a>', body, re.S)
-        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', body, re.S)
-        urls = re.findall(r'class="result__a" href="([^"]+)"', body)
+        url = "https://www.bing.com/search?" + urllib.parse.urlencode(
+            {"q": query, "format": "rss", "count": str(max_results)}
+        )
+        body = _open(url, timeout=25).read().decode("utf-8", "ignore")
+        root = ET.fromstring(body)
+        items = root.findall(".//item")
 
         out = [f"搜索「{query}」结果："]
         count = 0
-        for i, raw_link in enumerate(links):
+        for item in items:
             if count >= max_results:
                 break
-            title = html.unescape(re.sub(r"<[^>]+>", "", raw_link)).strip()
-            if not title:
+            title = _strip_html(item.findtext("title"))
+            link = _strip_html(item.findtext("link"))
+            snippet = _strip_html(item.findtext("description"))
+            if not title and not link:
                 continue
-            snippet = html.unescape(re.sub(r"<[^>]+>", "", snippets[i])) if i < len(snippets) else ""
-            real_url = ""
-            if i < len(urls):
-                m = re.search(r"uddg=(.*?)&", urls[i])
-                if m:
-                    real_url = urllib.parse.unquote(m.group(1)).strip()
-            link = real_url or (urls[i] if i < len(urls) else "N/A")
-            out.append(f"{count + 1}. {title}\n   链接: {link}\n   摘要: {snippet.strip()}")
+            out.append(f"{count + 1}. {title or 'N/A'}\n   链接: {link or 'N/A'}\n   摘要: {snippet}")
             count += 1
         if count == 0:
             return "未获取到搜索结果（可能是网络问题或搜索引擎拒绝请求）。"

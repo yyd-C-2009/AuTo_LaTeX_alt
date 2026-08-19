@@ -393,7 +393,7 @@ async def main():
     register_common_tools(tools, data)
     client = build_client()
     bus = Bus(tools, max_concurrency=4)
-    bus.mark_dangerous(["delete_memory", "replace_memory"])  # Agent 调用这两个工具前必须 y/n 确认
+    bus.mark_dangerous(["delete_memory", "replace_memory", "add_memory"])  # Agent 调用这几个工具前必须 y/n 确认
 
     # Listener 事件桥：后台转写线程通过 bus.emit_threadsafe 唤醒常驻 Agent。
     data["agent_listener"].attach_bus(bus, asyncio.get_running_loop())

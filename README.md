@@ -68,7 +68,7 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     .gitattributes（* text=auto + * text eol=lf）：统一所有文本文件行尾为 LF，
     .png/.pdf 标记为二进制不做转换，减少跨平台协作时的行尾杂音。
 
-    联网工具 built_in_tool.py：web_search（DuckDuckGo HTML 端点，无需 API key）、
+    联网工具 built_in_tool.py：web_search（Bing RSS 端点，无需 API key；原 DuckDuckGo 不可达已替换）、
     web_fetch（抓取网页转纯文本）、get_weather（wttr.in 实时天气）。
     均同步阻塞，经 Tools.async_execute 走 to_thread；已在 super.py main() 注册
     （web_search/web_fetch time_out=60，get_weather time_out=15）。
@@ -445,3 +445,6 @@ OCR 改动：
        新增 --skip-packages 可只下载模型跳过 pip 安装。
      - Agent.run_agent 增加 deny_tools 参数：Super 直接对话时禁用连续监听有状态工具，
        只能通过 listener_expert 间接使用，避免多 Agent 轮流读取/清空同一份累积转写。
+     - built_in_tool.py 的 web_search 由 DuckDuckGo HTML 端点改为 Bing RSS 端点：
+       原因：DuckDuckGo 在当前网络环境不可达（Errno 101 Network is unreachable）；
+       Bing RSS 返回标准 XML，解析稳定，仍无需 API key。
