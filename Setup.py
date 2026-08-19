@@ -13,9 +13,12 @@
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -99,17 +102,69 @@ def download_bge_model() -> None:
     _run_python(code, "下载 BGE 嵌入模型（BAAI/bge-base-zh-v1.5）")
 
 
-def download_listener_model(size: str = "small") -> None:
+def _download_modelscope_model(repo_id: str, model_dir: Path) -> None:
+    """通过 ModelScope 公开 API 分文件下载模型到本地目录（无需安装 modelscope 包）。"""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    files_url = (
+        "https://modelscope.cn/api/v1/models/"
+        f"{urllib.parse.quote(repo_id, safe='/')}/repo/files?Revision=master"
+    )
+    print(f"获取 ModelScope 文件列表：{files_url}")
+    req = urllib.request.Request(files_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    files = data.get("Data", {}).get("Files", [])
+    if not files:
+        print("ModelScope 未返回文件列表，可能模型不存在或 API 变动。")
+        return
+
+    for f in files:
+        name = f.get("Name")
+        if not name:
+            continue
+        dest = model_dir / name
+        if dest.exists() and dest.stat().st_size == int(f.get("Size") or 0):
+            print(f"跳过已存在文件：{name}")
+            continue
+        file_url = (
+            "https://modelscope.cn/api/v1/models/"
+            f"{urllib.parse.quote(repo_id, safe='/')}/repo?Revision=master&"
+            f"FilePath={urllib.parse.quote(name, safe='')}"
+        )
+        print(f"下载 {name} <- {file_url}")
+        req2 = urllib.request.Request(file_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req2, timeout=120) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if total and done % (20 * 1024 * 1024) < len(chunk):
+                        print(f"  {name}: {done / 1024 / 1024:.1f}MB / {total / 1024 / 1024:.1f}MB")
+        print(f"完成：{name}")
+    print(f"ModelScope 模型已下载至：{model_dir}")
+
+
+def download_listener_model(size: str = "small", source: str = "modelscope") -> None:
     """下载 Faster-Whisper 模型到 ./models/faster-whisper-<size>，供 Listener 使用。"""
     model_dir = ROOT / "models" / f"faster-whisper-{size}"
     model_dir.mkdir(parents=True, exist_ok=True)
-    repo_id = f"Systran/faster-whisper-{size}"
-    code = (
-        "from huggingface_hub import snapshot_download\n"
-        f"snapshot_download(repo_id={repo_id!r}, local_dir={str(model_dir)!r})\n"
-        "print('Faster-Whisper 模型已下载至', " + repr(str(model_dir)) + ")\n"
-    )
-    _run_python(code, f"下载 Faster-Whisper 模型（{repo_id}）")
+    if source == "hf":
+        repo_id = f"Systran/faster-whisper-{size}"
+        code = (
+            "from huggingface_hub import snapshot_download\n"
+            f"snapshot_download(repo_id={repo_id!r}, local_dir={str(model_dir)!r})\n"
+            "print('Faster-Whisper 模型已下载至', " + repr(str(model_dir)) + ")\n"
+        )
+        _run_python(code, f"下载 Faster-Whisper 模型（{repo_id}，hf-mirror）")
+    else:
+        repo_id = f"pengzhendong/faster-whisper-{size}"
+        _download_modelscope_model(repo_id, model_dir)
 
 
 def preload_pix2text_models() -> None:
@@ -138,23 +193,31 @@ def main() -> None:
     parser.add_argument("--with-listener", action="store_true", help="预下载 Listener 的 Faster-Whisper 模型")
     parser.add_argument("--listener-size", default=os.environ.get("LISTENER_MODEL_SIZE", "small"),
                         help="Faster-Whisper 模型规模：tiny/base/small/medium/large-v3（默认 small）")
+    parser.add_argument("--listener-source", choices=["modelscope", "hf"],
+                        default=os.environ.get("LISTENER_DOWNLOAD_SOURCE", "modelscope"),
+                        help="Listener 模型下载源：modelscope（默认，国内更稳）/ hf（hf-mirror）")
     parser.add_argument("--skip-models", action="store_true", help="只安装 Python 依赖，不下载任何模型")
+    parser.add_argument("--skip-packages", action="store_true", help="跳过 pip 依赖安装，只下载模型")
     parser.add_argument("--mirror", default=None, help="指定 pip 镜像源（默认清华镜像，失败自动切换）")
     parser.add_argument("--no-verify", action="store_true", help="跳过依赖导入验证")
     args = parser.parse_args()
 
-    install_packages(args.mirror)
+    if args.skip_packages:
+        print("已跳过 pip 依赖安装。请确保 faster-whisper / sounddevice 等依赖已安装。\n")
+    else:
+        install_packages(args.mirror)
 
     if args.skip_models:
         print("已跳过模型下载。Saver 需要 BGE 模型；Pix2Text/Listener 模型将在首次使用时自动下载（已走镜像）。")
     else:
         download_bge_model()
         if args.with_listener:
-            download_listener_model(args.listener_size)
+            download_listener_model(args.listener_size, args.listener_source)
         else:
             print(
-                "\n提示：Listener 的 Faster-Whisper 模型将在首次转写时自动下载（已默认走 hf-mirror.com 镜像）。\n"
-                "如需现在预下载，可重新运行：python Setup.py --with-listener"
+                "\n提示：Listener 的 Faster-Whisper 模型将在首次转写时自动下载（默认走 hf-mirror.com）。\n"
+                "如网络不通，请运行：python Setup.py --with-listener --listener-source modelscope\n"
+                "（ModelScope 国内源，文件直接下载到 ./models/faster-whisper-<size>）。"
             )
         if args.with_ocr:
             preload_pix2text_models()
@@ -171,6 +234,7 @@ def main() -> None:
     print(f"- BGE 嵌入模型目录：{BGE_DIR}")
     if not args.skip_models and args.with_listener:
         print(f"- Faster-Whisper 模型目录：{ROOT / 'models' / f'faster-whisper-{args.listener_size}'}")
+        print(f"- Listener 模型下载源：{args.listener_source}")
     print("- 可通过环境变量 BGE_MODEL_DIR 覆盖嵌入模型路径；LISTENER_MODEL_DIR/LISTENER_MODEL_SIZE 覆盖 Listener 模型。")
     print("- Visal.py 已默认 HF_ENDPOINT=https://hf-mirror.com。")
 

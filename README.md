@@ -87,7 +87,8 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     /whoami、/help、/exit；复用 super.py 的 register_common_tools / build_client / build_super_tools。
 
     Setup.py 一键安装脚本：pip 走清华/阿里云/中科大镜像，HuggingFace 模型走 hf-mirror.com；
-    默认安装依赖并下载 BGE 嵌入模型，--with-ocr 可预下载 Pix2Text OCR 模型。
+    默认安装依赖并下载 BGE 嵌入模型，--with-ocr 可预下载 Pix2Text OCR 模型，
+    --with-listener 可预下载 Faster-Whisper 模型（--listener-source modelscope/hf，默认 modelscope 国内源）。
 
     Listener 音频转写与连续监听（listener.py）：Listener 类在 init() 中常驻加载 Faster-Whisper，
     transcribe_audio 转写音频文件，start_listening/stop_listening/get_listen_result 连续监听；
@@ -243,7 +244,8 @@ OCR 改动：
         register_common_tools 注册该实例的 bound methods。
      2. 单文件转写 transcribe_audio(audio_path, language="auto", task="transcribe") -> str，
         返回带时间戳文本；模型目录支持 LISTENER_MODEL_DIR，默认 ./models/faster-whisper-small；
-        目录不存在时自动从 hf-mirror.com 下载（listener.py 中 setdefault HF_ENDPOINT）。
+        目录不存在时不再自动联网下载（避免 HF 网络超时拖死启动），而是记录 load_error
+        并提示运行 Setup.py --with-listener --listener-source modelscope 下载。
      3. 连续监听（依赖 sounddevice）：
          - start_listening(segment_duration=8.0, sample_rate=16000)：后台线程启动麦克风流，
            按段转写并累积到内存；
@@ -251,8 +253,9 @@ OCR 改动：
          - stop_listening(include_timestamps=True)：停止监听并返回累积转写（不清空）；
          - clear_listen_result(confirm=True)：显式清空累积转写。
      4. Setup.py 已加入 faster-whisper / sounddevice / numpy 依赖，并新增
-        --with-listener / --listener-size 参数，可预下载 Systran/faster-whisper-<size>
-        到 ./models/faster-whisper-<size>。
+        --with-listener / --listener-size / --listener-source 参数；默认从 ModelScope
+        下载 pengzhendong/faster-whisper-<size> 到 ./models/faster-whisper-<size>，
+        --listener-source hf 则走 hf-mirror.com。
      5. EXPERTS 已增加 "listener"：tool_names=["transcribe_audio", "start_listening",
         "stop_listening", "get_listen_result", "clear_listen_result"]；
         build_super_tools 自动注册 listener_expert，且 listener_expert 超时放宽到 1800s。
@@ -262,6 +265,9 @@ OCR 改动：
         clear_listen_result）只允许 listener_expert 通过白名单调用；Super 直接对话时通过
         run_agent 的 deny_tools 禁用这些工具，必须经 listener_expert 间接使用，避免多 Agent
         轮流读取/清空同一份累积转写造成状态竞争。transcribe_audio 仍对 Super 全局可见。
+     8. 加载失败不致命：Listener.__init__ 若模型缺失/下载失败，不再抛出异常导致启动失败；
+        会记录 load_error，transcribe_audio/start_listening 返回明确提示：
+        python Setup.py --with-listener --listener-source modelscope 下载模型。
 
    后续可扩展（未实施）：
      - 实时 VAD 静音分段（当前按固定秒数分段）；
@@ -355,5 +361,9 @@ OCR 改动：
        后台线程按段转写并累积）；Setup.py 增加 sounddevice/numpy 依赖。
      - get_listen_result 改为只读（不取走/不清空），新增 clear_listen_result(confirm=True) 显式清空。
      - Listener 加载时打印实际模型路径/来源（本地目录或 HF 缓存），便于确认下载位置。
+     - Listener 模型加载失败改为非致命：启动不崩溃，工具调用时返回下载指引。
+     - Setup.py 新增 --listener-source {modelscope,hf}，默认 modelscope 国内源
+       （pengzhendong/faster-whisper-<size>），通过 ModelScope API 直接下载到本地模型目录；
+       新增 --skip-packages 可只下载模型跳过 pip 安装。
      - Agent.run_agent 增加 deny_tools 参数：Super 直接对话时禁用连续监听有状态工具，
        只能通过 listener_expert 间接使用，避免多 Agent 轮流读取/清空同一份累积转写。

@@ -32,20 +32,29 @@ class Listener:
             or os.path.join(BASE_DIR, "models", f"faster-whisper-{self.model_size}")
         )
 
-        from faster_whisper import WhisperModel
+        self.model = None
+        self.load_error = None
+        try:
+            from faster_whisper import WhisperModel
 
-        if os.path.isdir(self.model_dir) and os.listdir(self.model_dir):
-            model_path = self.model_dir
-            path_desc = model_path
-        else:
-            model_path = self.model_size  # 目录不存在时交给 faster-whisper 从 HF 镜像自动下载
-            path_desc = f"{self.model_size}（HF 缓存目录，自动下载）"
-
-        self.model = WhisperModel(model_path, device=device, compute_type=compute_type)
-        self.model_path = model_path
-        print(f"----------Listener loaded（模型: {path_desc}）----------")
-        self._model_lock = threading.Lock()
-
+            if os.path.isdir(self.model_dir) and os.listdir(self.model_dir):
+                model_path = self.model_dir
+                self.model = WhisperModel(model_path, device=device, compute_type=compute_type)
+                self.model_path = model_path
+                print(f"----------Listener loaded（模型: {model_path}）----------")
+            else:
+                # 不自动联网下载，避免 HF 网络不通时启动超时；改为明确报错，由 Setup.py 下载模型。
+                self.load_error = f"模型目录不存在或为空: {self.model_dir}"
+                self.model_path = None
+                print(f"Listener 模型未下载：{self.model_dir}")
+                print("请运行：python Setup.py --with-listener --listener-source modelscope 下载模型；")
+                print("或设置 LISTENER_MODEL_DIR 指向已下载的模型目录后重新启动。")
+        except Exception as e:
+            self.load_error = f"{type(e).__name__}: {e}"
+            self.model_path = None
+            print(f"Listener 模型加载失败：{self.load_error}")
+            print("请运行：python Setup.py --with-listener --listener-source modelscope 下载模型；")
+            print("或设置 LISTENER_MODEL_DIR 指向已下载的模型目录后重新启动。")
         # 连续监听状态
         self._listen_thread: threading.Thread | None = None
         self._listen_stop = threading.Event()
@@ -103,6 +112,12 @@ class Listener:
         task: Annotated[str, "任务：transcribe=转写原文语言，translate=翻译为英文"] = "transcribe",
     ) -> str:
         """使用常驻 Faster-Whisper 模型把音频文件转写为文字（带时间戳）。"""
+        if self.model is None:
+            return (
+                f"Listener 模型未加载（{self.load_error}）。"
+                "请先运行：python Setup.py --with-listener --listener-source modelscope 下载模型；"
+                "或设置 LISTENER_MODEL_DIR 指向已下载的模型目录。"
+            )
         if not audio_path or not os.path.isfile(audio_path):
             return f"错误: 音频文件不存在 {audio_path}"
 
@@ -195,6 +210,12 @@ class Listener:
         sample_rate: Annotated[int, "采样率（默认 16000）"] = 16000,
     ) -> str:
         """启动麦克风连续监听：后台按段录音并转写，结果累积在内存中。"""
+        if self.model is None:
+            return (
+                f"Listener 模型未加载（{self.load_error}）。"
+                "请先运行：python Setup.py --with-listener --listener-source modelscope 下载模型；"
+                "或设置 LISTENER_MODEL_DIR 指向已下载的模型目录。"
+            )
         if self._listen_thread and self._listen_thread.is_alive():
             return "连续监听已在运行中，请勿重复启动。"
 

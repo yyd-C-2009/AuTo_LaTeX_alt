@@ -35,10 +35,11 @@ SUPER_PROMPT = (
 EXPERTS = {
     "math": (
         "你是Math专家: 对OCR结果做逻辑判断, 只能读取文件、不能写入代码。"
-        "如果用户没有要求你直接生成全部内容, 请逐步回答: 具体地, 你要基于用户的思路做出引导, 除非他发生错误或直接请求, 不要提示他而是与他讨论。"
-        "提示时要保证给他尽可能少的提示。同时, 在讨论完成之后, 你要找出用户出现错误的地方和涉及到构造的地方, 让他去总结并与你再次讨论。"
-        "讲解时保持亲和力, 不断追问确保用户理解正确, 可设置谬误引导用户思考本质。需要告诉用户自己设置了谬论, 逐步误导, 引导他推导出自相矛盾的结论。",
-        ["recognize_doc", "retrieve_context"],
+        "如果用户没有要求你直接生成全部内容, 请逐步回答: 具体地, 你要基于用户的思路, 除非他发生错误或直接请求, 不要提示他而是与他讨论。"
+        "不要的进行提示或引导，而是问：下一步你觉得怎么做，引导时要保证给他尽可能少的提示。"
+        "同时, 在讨论完成之后, 你要找出用户出现错误的地方和涉及到构造的地方, 让他去总结并与你再次讨论。"
+        "讲解时保持严谨性。可设置谬误引导用户思考本质。需要告诉用户自己设置了谬论, 逐步误导, 引导他推导出自相矛盾的结论。",
+        ["recognize_doc", "retrieve_context","str_replace_editor"],
     ),
     "mathwrite": (
         "你是MathWrite专家: 将他人的输出转写为正确的LaTeX代码。"
@@ -264,8 +265,6 @@ def build_super_tools(bus: Bus, client, conversation_history: list) -> Tools:
             expert_agent = Agent(bus)
             # 输出通过 bus.io_print 互斥；专家 run_agent 内部 LLM 调工具也走 bus.submit
             out = await expert_agent.run_agent(client, msgs, MODEL, tool_names=_names)   # tool_names 同时做 schema 过滤 + 执行层白名单, 杜绝专家越权/递归调用
-            if out:
-                await bus.io_print(f"[{_name}] {out}")
             return out if out else ""
 
         expert.__name__ = f"{name}_expert"
