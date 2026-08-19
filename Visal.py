@@ -192,4 +192,3 @@ if __name__ == '__main__':
         providers=['DmlExecutionProvider']
     )
     print(f"当前 ONNX Runtime 可用 providers: {onnxruntime.get_available_providers()}")
-    print(p2t.recognize('test2.png', return_text=True))

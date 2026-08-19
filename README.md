@@ -388,6 +388,8 @@ OCR 改动：
        view_theorem_style，严格按 example.tex 的导言区、定理环境声明与 label/ref 命令执行，
        写完必须 check_latex 直到通过。
      - README 将「MathWrite 定理环境编写计划」更新为「已实施」并补充规范要点与验收方式。
+     - 新增实验脚本 test_pix2tex_dml.py：独立测试 pix2tex（LaTeX-OCR）在 Intel Arc DML
+       上识别公式；不修改主流程。用法：python test_pix2tex_dml.py formula.png。
      - terminal.py 重置为多Agent直接对话终端：新增 /db（查看数据库）、/agent（切换直接对话 Agent）、
        /branch（对话分支 list/fork/new/switch/rm）、/whoami、/help、/exit 系统指令；
        切换 Agent 会清空当前分支历史，分支 fork/new/switch/rm 管理多线对话。
