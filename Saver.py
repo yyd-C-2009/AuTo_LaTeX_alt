@@ -123,7 +123,7 @@ class Saver:
 
     # ---------- 6. 检索（保留原逻辑，但确保注入时去重） ----------
     def retrieve_context(self,query: str, top_k: int = 3) -> str:
-        '''查询历史记忆'''
+        '''查询历史记忆，如果对命令有任何不理解或者对要求有任何疑问，请先查阅记忆'''
         if self.collection.count() == 0:
             return 'No data'
         results = self.collection.query(

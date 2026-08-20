@@ -32,7 +32,8 @@ class Bus():
     外部函数从tools.async_execute接入系统
     '''
     EOWM  = Message('Task_end')         #End Of Work Mark
-    def __init__(self,tools : Tools = None,max_concurrency:int = 5):
+    def __init__(self,tools : Tools = None,max_concurrency:int = 5, renderer=None):
+        self.renderer = renderer        # 终端渲染器（None=回退普通 print/input）
         self.handler = {} #handler注册队列
         self.message_queue = asyncio.Queue(-1)     #消息队列，长度不设限
         self.tools = tools if tools is not None else Tools()
@@ -106,7 +107,7 @@ class Bus():
                 if asyncio.iscoroutine(ret):
                     await ret
             except Exception as e:
-                print(f"[bus.publish] 事件 {event_name} 回调异常：{type(e).__name__}: {e}")
+                self.io_status("state", f"[bus.publish] 事件 {event_name} 回调异常：{type(e).__name__}: {e}")
         return None
 
     def emit_threadsafe(self, event_name: str, content: dict | None = None, loop=None) -> None:
@@ -116,7 +117,7 @@ class Bus():
         try:
             asyncio.run_coroutine_threadsafe(self.publish(event_name, content), loop)
         except Exception as e:
-            print(f"[bus.emit_threadsafe] 事件 {event_name} 派发失败：{type(e).__name__}: {e}")
+            self.io_status("state", f"[bus.emit_threadsafe] 事件 {event_name} 派发失败：{type(e).__name__}: {e}")
         return None
 
     def mark_reentrant(self,tasks:list[str] = []):
@@ -173,16 +174,31 @@ class Bus():
 
     # ==================== 控制台 IO 锁（多 Agent 共享控制台） ====================
 
+    def io_status(self, category: str, text: str):
+        '''（线程安全，可在后台线程调用）向终端底部状态区写入某一类状态的最新一行。
+        若未绑定渲染器（self.renderer 为 None），退化为普通 print。'''
+        if self.renderer is not None:
+            self.renderer.status_set(category, text)
+        else:
+            print(f"[{category}] {text}")
+
     async def io_print(self, text: str = ""):
-        '''不带 input 的输出：只锁「写控制台」这一下（粒度最细，防止多 Agent print 交错）'''
+        '''不带 input 的输出：只锁「写控制台」这一下（粒度最细，防止多 Agent print 交错）。
+        绑定渲染器时写入正文滚动区，否则退化为普通 print。'''
         async with self._io_lock:
-            print(text)
+            if self.renderer is not None:
+                self.renderer.body_write(text if text else "")
+            else:
+                print(text)
 
     async def io_dialog(self, text: str = "") -> str:
         '''带 input 的对话回合：把「一次输出 + 下一次输入」作为完整过程锁定。
         等待输入时 await 挂起（不占用事件循环），返回用户输入内容。
-        提示文本只由 print(text) 输出一次，input 不再带内置提示符（否则会出现重复提示）。'''
+        绑定渲染器时提示画在底部输入行（等待期间后台可刷新状态行），否则退化为普通 print+input。'''
         async with self._io_lock:
+            if self.renderer is not None:
+                # text 作为输入提示；若希望输入前先输出正文，调用方应先 io_print
+                return await self.renderer.input_line(prompt=text if text else "你: ")
             print(text)
             return await asyncio.to_thread(input)
 

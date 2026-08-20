@@ -12,6 +12,7 @@ from Tools import Tools
 from Saver import Saver
 from Visal import Visal
 from listener import Listener
+from plan import Plan
 import hashlib
 import asyncio
 
@@ -21,8 +22,9 @@ async def init():
     agent_memory = await asyncio.to_thread(Saver)
     agent_visal = await asyncio.to_thread(Visal)
     agent_listener = await asyncio.to_thread(Listener)
+    agent_plan = await asyncio.to_thread(Plan)
     # 测试加载是否报错，以及能否正常编码
     # test_model = SentenceTransformer("C:/Users/yangyiding/.cache/huggingface/hub/models--BAAI--bge-base-zh-v1.5/snapshots/f03589ceff5aac7111bd60cfc7d497ca17ecac65", local_files_only=True)
     # test_vector = test_model.encode("测试文本", normalize_embeddings=True)
     # print(f"向量维度：{len(test_vector)},前5位:{test_vector[:5].tolist()}")
-    return {"agent_memory":agent_memory,'agent_visal':agent_visal,'agent_listener':agent_listener}
+    return {"agent_memory":agent_memory,'agent_visal':agent_visal,'agent_listener':agent_listener,'agent_plan':agent_plan}

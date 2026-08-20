@@ -8,6 +8,10 @@
         HF_ENDPOINT          HuggingFace 镜像（默认 https://hf-mirror.com）
     - 连续监听依赖 sounddevice（麦克风），在后台线程中按段转写，转写结果累积在实例中，
       通过 start_listening / stop_listening / get_listen_result 工具访问。
+    - 连续监听具备"防落后/追实时"机制：当单次转写耗时较长、待处理音频不断积压时，
+      按 LISTENER_MAX_LAG_SEC（默认 20s）限制输出落后上限；超过上限自动丢弃最旧音频，
+      只转写最近内容，避免输出落后讲话 1~2 分钟。
+      相关环境变量：LISTENER_MAX_LAG_SEC、LISTENER_DROP_OLDEST_ON_LAG。
 """
 
 import asyncio
@@ -68,6 +72,14 @@ class Listener:
         self._listen_seq = 0  # 单调递增的转写条目序号；clear 只清列表不清序号，保证游标不倒退
         self._max_transcript_entries = max(1, int(os.environ.get("LISTENER_MAX_TRANSCRIPT_ENTRIES", "200")))
         self._rms_threshold = float(os.environ.get("LISTENER_RMS_THRESHOLD", "0.01"))
+        # 连续监听"实时性"控制：
+        #   _max_lag_sec   允许输出落后实时音频的最大秒数。超过该值时丢弃最旧的存量音频，
+        #                 只转写最近的音频，避免"转写慢 → 队列越积越多 → 落后无上限"。
+        #   _drop_oldest_on_lag  True=落后超标时丢弃旧音频强追实时；False=仅限制队列深度（仍会积压）。
+        self._max_lag_sec = float(os.environ.get("LISTENER_MAX_LAG_SEC", "20.0"))
+        self._drop_oldest_on_lag = os.environ.get("LISTENER_DROP_OLDEST_ON_LAG", "1") not in (
+            "", "0", "false", "False", "no",
+        )
         self._transcript_lock = threading.Lock()
         self.bus = None
         self.loop = None
@@ -86,7 +98,7 @@ class Listener:
                 self.loop,
             )
         except Exception as e:
-            print(f"[Listener] 转写事件通知失败：{type(e).__name__}: {e}")
+            self.bus.io_status("state", f"Listener 转写事件通知失败: {type(e).__name__}: {e}")
 
     # ---------- 转写辅助 ----------
 
@@ -108,11 +120,16 @@ class Listener:
             return True
         return False
 
-    def _segments_to_lines(self, segments) -> list[str]:
+    def _segments_to_lines(self, segments, offset: float = 0.0) -> list[str]:
+        """把 Whisper 片段转成带时间戳的文本行。
+
+        offset：录音块的全局起始秒数。Whisper 的 start/end 是块内相对时间，
+        叠加 offset 后得到相对整场录音的全局时间，便于后续去重/对齐。
+        """
         lines = []
         for seg in segments:
-            start = getattr(seg, "start", 0.0)
-            end = getattr(seg, "end", 0.0)
+            start = offset + getattr(seg, "start", 0.0)
+            end = offset + getattr(seg, "end", 0.0)
             text = (seg.text or "").strip()
             if not text or self._is_low_quality(seg):
                 continue
@@ -127,14 +144,30 @@ class Listener:
         )
         return header + ("\n".join(lines) if lines else "(未识别到有效语音内容)")
 
-    def _transcribe_array(self, audio) -> list[str]:
+    def _transcribe_array(self, audio, offset: float = 0.0,
+                          max_duration: float | None = None,
+                          sample_rate: int = 16000) -> list[str]:
+        """转写一段 numpy 音频数组，返回带（全局）时间戳的文本行。
+
+        offset：该段音频相对整场录音的全局起始秒数（用于时间戳对齐）。
+        max_duration：可选，若大于 0，转写前把音频截断到该秒数（每段预算），
+        避免转写超大块导致单次推理时间过长、落后越积越多。
+        sample_rate：连续监听的采样率（用于 max_duration 换算）。
+        """
         import numpy as np
 
         arr = np.asarray(audio, dtype=np.float32).squeeze()
         if arr.ndim == 2:
             arr = arr.mean(axis=1)
         if arr.size == 0:
-            return ["(空音频)"]
+            return []
+
+        if max_duration and max_duration > 0 and arr.size > int(max_duration * sample_rate):
+            # 只取最近 max_duration 秒，offset 相应前移，保证转写的是"最新"内容（追实时）。
+            keep = int(max_duration * sample_rate)
+            orig_size = arr.size
+            arr = arr[-keep:]
+            offset = max(0.0, offset + (orig_size - keep) / sample_rate)
 
         try:
             with self._model_lock:
@@ -150,6 +183,7 @@ class Listener:
                     logprob_threshold=-0.6,
                     compression_ratio_threshold=2.0,
                     beam_size=5,
+                    temperature=0.0,  # 避免随机性，保证同一音频每次转写结果一致
                 )
         except TypeError:
             # 旧版 faster-whisper 可能不支持 vad_parameters，降级重试
@@ -173,7 +207,7 @@ class Listener:
                         condition_on_previous_text=False,
                         beam_size=5,
                     )
-        return self._segments_to_lines(segments)
+        return self._segments_to_lines(segments, offset)
 
     # ---------- 单文件转写工具 ----------
 
@@ -249,8 +283,36 @@ class Listener:
         import numpy as np
         import sounddevice as sd
 
-        buffer: list = []
-        buffered_sec = 0.0
+        # 每个录音块在全局录音中的起始秒数（即从监听开始累计的偏移）。
+        # 严格等于：已消费并转写(或丢弃)的音频秒数。
+        offset_sec = 0.0
+        # 待转写的音频块缓冲；放在 try 外初始化，确保 finally 里始终可用。
+        pending: list = []
+
+        def _drain_queue() -> list:
+            """取走队列中当前全部录音块，返回 (blocks, 块总秒数)。"""
+            blocks = []
+            total = 0.0
+            while True:
+                try:
+                    block = self._listen_queue.get_nowait()
+                except queue.Empty:
+                    break
+                blocks.append(block)
+                total += len(block) / sample_rate
+            return blocks, total
+
+        def _trim_front(blocks: list, drop_sec: float) -> tuple[list, float]:
+            """从最旧处丢弃 drop_sec 秒，返回 (剩余blocks, 实际丢弃秒数)。"""
+            dropped = 0.0
+            i = 0
+            while i < len(blocks) and dropped + len(blocks[i]) / sample_rate <= drop_sec + 1e-9:
+                dropped += len(blocks[i]) / sample_rate
+                i += 1
+            if i:
+                blocks = blocks[i:]
+            return blocks, dropped
+
         try:
             with sd.InputStream(
                 samplerate=sample_rate,
@@ -259,32 +321,63 @@ class Listener:
                 callback=self._audio_callback,
             ):
                 while not self._listen_stop.is_set():
-                    try:
-                        block = self._listen_queue.get(timeout=1.0)
-                    except queue.Empty:
+                    new_blocks, new_sec = _drain_queue()
+                    if new_blocks:
+                        pending.extend(new_blocks)
+                        # 落后（即累计待处理音频）超过预算时，丢弃最旧的音频以追实时，
+                        # 避免"转写慢 → 待处理越积越多 → 落后无上限（1~2 分钟）"。
+                        if self._drop_oldest_on_lag and self._max_lag_sec > 0:
+                            pending_sec = sum(len(b) / sample_rate for b in pending)
+                            over = pending_sec - (segment_duration + self._max_lag_sec)
+                            if over > 0:
+                                pending, dropped = _trim_front(pending, over)
+                                offset_sec += dropped
+
+                    if not pending:
+                        # 没有足够的新音频，稍等再取。
+                        self._listen_stop.wait(timeout=0.2)
                         continue
-                    buffer.append(block)
-                    buffered_sec += len(block) / sample_rate
-                    if buffered_sec >= segment_duration:
-                        audio = np.concatenate(buffer)
-                        buffer, buffered_sec = [], 0.0
-                        arr = np.asarray(audio, dtype=np.float32).squeeze()
-                        if arr.ndim == 2:
-                            arr = arr.mean(axis=1)
-                        # 能量过低视为静音/噪声，直接跳过，避免 Whisper 对无语音段产生幻觉
-                        if arr.size == 0 or float(np.sqrt(np.mean(arr ** 2))) < self._rms_threshold:
-                            continue
-                        lines = self._transcribe_array(audio)
-                        self._append_transcript_lines(lines)
+
+                    # 从最旧处凑满一个 segment_duration 的块来转写。
+                    take_sec = 0.0
+                    take_idx = 0
+                    while take_idx < len(pending) and take_sec < segment_duration:
+                        take_sec += len(pending[take_idx]) / sample_rate
+                        take_idx += 1
+                    if take_sec < min(segment_duration, 0.5):
+                        # 音频不足一句，继续攒。
+                        self._listen_stop.wait(timeout=0.2)
+                        continue
+
+                    chunk = pending[:take_idx]
+                    pending = pending[take_idx:]
+                    block_offset = offset_sec
+                    offset_sec += take_sec
+
+                    audio = np.concatenate(chunk)
+                    arr = np.asarray(audio, dtype=np.float32).squeeze()
+                    if arr.ndim == 2:
+                        arr = arr.mean(axis=1)
+                    # 能量过低视为静音/噪声，直接跳过，避免 Whisper 对无语音段产生幻觉
+                    if arr.size == 0 or float(np.sqrt(np.mean(arr ** 2))) < self._rms_threshold:
+                        continue
+                    # max_duration 作为单次转写的强约束：确保一次推理不会因为音频过长
+                    # 而耗时远超实时，从而把落后控制在 _max_lag_sec 内。
+                    lines = self._transcribe_array(
+                        audio, offset=block_offset,
+                        max_duration=segment_duration, sample_rate=sample_rate,
+                    )
+                    self._append_transcript_lines(lines)
         except Exception as e:
             self._append_transcript_lines([f"[连续监听异常] {type(e).__name__}: {e}"])
         finally:
-            if buffer:
+            # 收尾：把 pending 里剩余音频（若有）转写完。
+            if pending:
                 try:
                     import numpy as np
 
-                    audio = np.concatenate(buffer)
-                    lines = self._transcribe_array(audio)
+                    audio = np.concatenate(pending)
+                    lines = self._transcribe_array(audio, offset=offset_sec)
                     self._append_transcript_lines(lines)
                 except Exception as e:
                     self._append_transcript_lines([f"[收尾转写异常] {type(e).__name__}: {e}"])
@@ -302,7 +395,12 @@ class Listener:
                 # 自动截断：只保留最近 N 条，与常驻消息截断策略一致。
                 if len(self._listen_transcript) > self._max_transcript_entries:
                     del self._listen_transcript[: len(self._listen_transcript) - self._max_transcript_entries]
-            print(f"[Listener] {line[:120]}")
+            # 转写结果只更新到终端底部状态区「listener」槽（每类仅占一行），
+            # 不再用 print 刷屏挤占正文；无渲染器时退化为普通 print。
+            if self.bus is not None:
+                self.bus.io_status("listener", line[:120])
+            else:
+                print(f"[Listener] {line[:120]}")
         if appended:
             self._notify_transcript(appended)
 
@@ -357,9 +455,11 @@ class Listener:
             daemon=True,
         )
         self._listen_thread.start()
+        drop_hint = "超出自动丢弃旧音频以追实时" if self._drop_oldest_on_lag else "仅限制处理量"
         return (
             f"连续监听已启动：每 {segment_duration:.1f}s 转写一段，"
-            f"采样率 {sample_rate}Hz。可用 get_listen_result 查看，stop_listening 停止。"
+            f"采样率 {sample_rate}Hz；落后上限 {self._max_lag_sec:.0f}s（{drop_hint}）。"
+            f"可用 get_listen_result 查看，stop_listening 停止。"
         )
 
     def stop_listening(

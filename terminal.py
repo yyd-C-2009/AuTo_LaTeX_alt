@@ -34,6 +34,7 @@ from Agent import Agent
 from event_bus import Bus
 from Tools import Tools
 from initer import init
+from render import TerminalRenderer, set_renderer
 from resident import ResidentManager, register_resident_tools
 from super import (
     SUPER_PROMPT,
@@ -392,7 +393,12 @@ async def main():
     tools = Tools()
     register_common_tools(tools, data)
     client = build_client()
-    bus = Bus(tools, max_concurrency=4)
+
+    # 终端渲染器：固定底部状态区 + 上方正文滚动区，除正文外每类信息只占一行
+    renderer = TerminalRenderer(status_slots=["listener", "debug", "state"])
+    set_renderer(renderer)
+
+    bus = Bus(tools, max_concurrency=4, renderer=renderer)
     bus.mark_dangerous(["delete_memory", "replace_memory", "add_memory"])  # Agent 调用这几个工具前必须 y/n 确认
 
     # Listener 事件桥：后台转写线程通过 bus.emit_threadsafe 唤醒常驻 Agent。
@@ -411,18 +417,21 @@ async def main():
     build_super_tools(bus, client, session.super_history)
 
     await bus.io_print("===== terminal.py 多Agent直接对话终端（输入 /help 查看指令，/exit 退出）=====")
-    while True:
-        line = await bus.io_dialog(f"[{session.active_branch}:{session.agent}] >>> ")
-        line = line.strip()
-        if not line:
-            continue
-        if line in ("/exit", "\\exit", "exit", "quit"):
-            await bus.io_print("退出。")
-            return
-        if line.startswith("/") or line.startswith("\\"):
-            await session.handle_command(line)
-        else:
-            await session.chat(line)
+    try:
+        while True:
+            line = await bus.io_dialog(f"[{session.active_branch}:{session.agent}] >>> ")
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("/exit", "\\exit", "exit", "quit"):
+                await bus.io_print("退出。")
+                return
+            if line.startswith("/") or line.startswith("\\"):
+                await session.handle_command(line)
+            else:
+                await session.chat(line)
+    finally:
+        renderer.shutdown()
 
 
 if __name__ == "__main__":

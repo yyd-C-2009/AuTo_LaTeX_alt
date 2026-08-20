@@ -97,6 +97,16 @@ tool_call_id是独一无二的吗？他的生成机制是什么？
     transcribe_audio 转写音频文件，start_listening/stop_listening/get_listen_result 连续监听；
     已注册为全局工具并加入 listener 专家白名单。
 
+    Plan 日程/计划管理（plan.py）：Plan 类在 init() 中创建一次并常驻，所有内容存于 plan/ 文件夹下——
+    每日日程写入 plan/YYYYMMDD.md（缺当天自动创建），长期事务写入 plan/general.md；
+    提供 add_today_plan / view_plan / add_general_plan / view_general_plan 四个工具，
+    已在 register_common_tools 注册为全局工具，Super 可直接调用。
+
+    终端动态渲染（render.py）：基于 ANSI 转义序列，把终端分成「上方正文滚动区 + 底部固定状态区」。
+    除正文外的监听/调试/状态信息每种只占一行（listener / debug / state 三个槽位），
+    不再无限滚动挤占正文；非 TTY（重定向/日志）自动降级为普通 print，不输出 ANSI 乱码。
+    监听后台线程、Agent 调试、常驻 Agent 状态等信息分别写入对应状态槽。
+
     清理：已删除所有 test_*.py 以及 tmp.py、trail.py（实验/损坏代码）；
     历史条目中「验证：python test_*.py」为过往修复记录，对应 test 文件已被清理。
 
@@ -306,6 +316,17 @@ OCR 改动：
          - VAD 参数 min_silence_duration_ms=500 / speech_pad_ms=200；
          - 低质量片段过滤：no_speech_prob>0.4 / avg_logprob<-0.6 / compression_ratio>2.0 丢弃；
          - 连续监听新增 RMS 能量门槛（LISTENER_RMS_THRESHOLD，默认 0.01）：静音/噪声段直接跳过。
+     3.2 实时性优化——防落后/追实时（已实施）：
+         - 背景：CPU/GPU 未见满载时，若单次转写耗时较长，待处理音频不断积压，
+           会导致输出落后实际讲话 1~2 分钟且无上限。
+         - 方案：为连续监听增加"落后上限"控制。默认 LISTENER_MAX_LAG_SEC=20s；
+           当积压音频超过「一段 + 落后上限」时，自动丢弃最旧音频，只转写最近内容，
+           把输出落后始终压制在一个段 + 上限之内，实现"追实时"。
+         - 相关环境变量：
+             LISTENER_MAX_LAG_SEC（默认 20，允许输出的最大落后秒数）
+             LISTENER_DROP_OLDEST_ON_LAG（默认 1；0=仅限制处理、不丢音频仍会积压）
+         - 辅助改进：_transcribe_array 增加 temperature=0.0（确定性）与全局时间戳偏移对齐，
+           便于 notetaker 按全局时间戳去重/续接。
      4. Setup.py 已加入 faster-whisper / sounddevice / numpy 依赖，并新增
         --with-listener / --listener-size / --listener-source 参数；默认从 ModelScope
         下载 pengzhendong/faster-whisper-<size> 到 ./models/faster-whisper-<size>，
@@ -377,8 +398,24 @@ OCR 改动：
        LLM 主动调用时被 Agent.run_agent 拦截（不经 bus.submit/鉴权），强制注入当前 Agent 的缓存并返回，读后清空。
        慢任务等待改由 _wait_pending 轮询 poll，不消耗 max_step（避免 Super 提前放弃 Timeout）。
        （验证：python test_delayed_results_demo.py）
+    21.【高】✅已修复：Listener 连续监听输出落后实际讲话 1~2 分钟（CPU/GPU 未满载）。
+       原因：单次转写耗时较长时，待处理音频不断积压且无上限。
+       修复：新增落后上限（LISTENER_MAX_LAG_SEC，默认 20s），超过上限自动丢弃最旧音频
+       只转写最近内容，实现"追实时"（见 3.2 小节）。
 
  本次修改记录（本次编辑新增）：
+     - 新增 render.py：TerminalRenderer 终端动态渲染器（ANSI），
+       终端分为「正文滚动区 + 底部固定状态区」，监听/调试/状态每类各占一行；
+       非 TTY 自动降级为普通 print；线程安全（后台监听线程可实时刷新状态槽）。
+     - event_bus.Bus 新增 renderer 参数与 io_status(category, text)；
+       io_print 写正文滚动区、io_dialog 用输入行读取输入。
+     - listener.py / Agent.py / resident.py / event_bus.py 的监听、调试、状态/异常输出
+       分别改走 listener/debug/state 状态槽，不再直接 print 刷屏挤占正文。
+     - 新增 plan.py：Plan 类提供每日日程与长期事务管理——
+       每日日程写入 plan/YYYYMMDD.md（默认今天，支持 YYYYMMDD / YYYY-MM-DD / YYYY/MM/DD），
+       长期事务写入 plan/general.md；接口 add_today_plan / view_plan / add_general_plan / view_general_plan。
+     - initer.init() 新增 agent_plan（Plan 常驻对象）；register_common_tools 注册 4 个 plan 工具，
+       Super（super.py 与 terminal.py）可直接调用。
      - super.py 新增 view_expert_prompts 工具：返回 EXPERTS 中每位专家的系统提示词与工具白名单；
        已在 main() 注册（time_out=5），并更新 SUPER_PROMPT 提示 Super 在诊断提示词时可调用。
      - README 补充记录 built_in_tool.py / super.py 中已加入的 get_weather 天气工具（wttr.in，time_out=15）。

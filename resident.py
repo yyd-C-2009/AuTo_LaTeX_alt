@@ -53,7 +53,7 @@ class ResidentAgent:
 
     async def run(self):
         self.bus.on("listener.transcript_updated", self._on_listener_event)
-        await self.bus.io_print(f"[resident:{self.name}] 已启动，interval={self.interval_sec:.0f}s")
+        self.bus.io_status("state", f"[resident:{self.name}] 已启动 (interval={self.interval_sec:.0f}s)")
         try:
             while not self.stop_event.is_set():
                 try:
@@ -66,7 +66,7 @@ class ResidentAgent:
                 await self._tick()
         finally:
             self.bus.off("listener.transcript_updated", self._on_listener_event)
-            await self.bus.io_print(f"[resident:{self.name}] 已退出循环")
+            self.bus.io_status("state", f"[resident:{self.name}] 已退出")
 
     async def _tick(self):
         trigger = self._build_trigger()
@@ -82,7 +82,7 @@ class ResidentAgent:
             if out:
                 await self.bus.io_print(f"[resident:{self.name}] {out}")
         except Exception as e:
-            await self.bus.io_print(f"[resident:{self.name}] 本轮异常：{type(e).__name__}: {e}")
+            self.bus.io_status("state", f"[resident:{self.name}] 本轮异常：{type(e).__name__}: {e}")
         finally:
             self._trim_messages()
 

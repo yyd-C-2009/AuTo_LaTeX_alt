@@ -11,6 +11,7 @@ from Tools import Tools
 from Saver import Saver
 from event_bus import Bus,Message
 from text_clean import text_clean
+from render import get_renderer
 import asyncio
 
 client = None
@@ -25,6 +26,15 @@ def tool_call_add(message:list,content:str,tool_call_id:str):
         'tool_call_id' : tool_call_id
     })
     return None
+
+
+def debug_status(text: str):
+    """把 Agent 的调试信息写入终端底部状态区「debug」槽（每类仅占一行），
+    避免一堆 DEBUG 打印挤占正文；无渲染器时退化为普通 print。"""
+    try:
+        get_renderer().status_set("debug", text)
+    except Exception:
+        print(text)
 
 
 def view_delayed_results(
@@ -84,7 +94,7 @@ class Agent:
         if deny is not None:
             schema = [s for s in schema if s['function']['name'] not in deny]
         while steps < max_step:
-            print(f'TASKKKS{steps}')
+            debug_status(f"step {steps}")
             steps += 1
 
             # ① 先 poll 在途慢任务：完成的回填结果并移出 pending
@@ -112,7 +122,7 @@ class Agent:
                     tool_choice="auto"
                 )
             except Exception as e:
-                print(f"LLM请求异常:{str(e)}")
+                debug_status(f"LLM请求异常: {str(e)}")
                 continue
 
             msg = resp.choices[0].message
@@ -128,14 +138,14 @@ class Agent:
                         # LLM 返回非法 JSON：回填错误 tool 消息（保持 tool_call_id 配对），让 LLM 下轮自行修正
                         tool_call_add(messages, f"参数 JSON 解析失败({type(e).__name__}): {e}，请修正参数格式后重试", tool_called.id)
                         continue
-                    print(f"LLM决定调用{func_name}，参数为{kwargs}")
+                    debug_status(f"调用 {func_name}")
 
                     # 特殊拦截：view_delayed_results 读取「自己」的延迟缓存，不经 bus.submit / 鉴权
                     if func_name == 'view_delayed_results':
                         cached = self.delayed_results
                         tool_call_add(messages, str(cached), tool_called.id)
                         self.delayed_results = []   # 读后清空
-                        print(f"[延迟结果窗口] 返回 {len(cached)} 条延迟结果")
+                        debug_status(f"延迟结果 {len(cached)} 条已返回")
                         continue
 
                     # 执行层鉴权：禁用名单内的工具一律拒绝执行（Super 用于禁用有状态工具）
@@ -145,7 +155,7 @@ class Agent:
                             f"拒绝调用 {func_name}：该工具为 Listener 连续监听的内部有状态工具，请通过 listener_expert 间接使用。",
                             tool_called.id,
                         )
-                        print(f"[鉴权拒绝] {func_name} 在禁用名单中，已拒绝")
+                        debug_status(f"[鉴权拒绝] {func_name} 在禁用名单中")
                         continue
 
                     # 执行层鉴权：白名单外的工具一律拒绝执行（防止专家自我调用/互相甩锅）
@@ -155,7 +165,7 @@ class Agent:
                             f"拒绝调用 {func_name}：该工具不在你的权限范围内。你的可用工具为：{sorted(allow)}。请在本职责内完成任务，勿尝试调用其他专家或越权工具。",
                             tool_called.id,
                         )
-                        print(f"[鉴权拒绝] {func_name} 不在白名单 {sorted(allow)}，已拒绝")
+                        debug_status(f"[鉴权拒绝] {func_name} 不在白名单")
                         continue
 
                     result = await self.bus.submit(func_name=func_name, **kwargs)
@@ -186,7 +196,7 @@ class Agent:
                 continue
             return msg.content
 
-        print("Timeout as agent be stuck in tools calling")   # 超过 max_step 判定死循环
+        debug_status("Timeout：agent 卡在工具调用")   # 超过 max_step 判定死循环
         return None
     async def _wait_pending(self, messages: list, poll_interval: float = 2.0, hard_timeout: float = 240.0):
         '''等待所有在途慢任务完成：只轮询 poll、不消耗 run_agent 的 step 计数，
@@ -213,7 +223,7 @@ class Agent:
             for tcid in finished:
                 self.pending.pop(tcid, None)
             if waited >= hard_timeout:
-                print(f"[慢任务等待硬超时] 仍有 {len(self.pending)} 个任务未完成，先返回让 LLM 处理")
+                debug_status(f"[慢任务硬超时] 仍有 {len(self.pending)} 个未完成")
                 break
         return None
 
