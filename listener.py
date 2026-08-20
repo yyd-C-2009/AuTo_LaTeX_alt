@@ -24,7 +24,7 @@ class Listener:
     """长生命周期监听器：持有 Faster-Whisper 模型，提供单文件转写与连续监听。"""
 
     def __init__(self, model_size: str | None = None, model_dir: str | None = None,
-                 device: str = "cpu", compute_type: str = "int8"):
+                 device: str = "cpu", compute_type: str = "float32"):
         os.environ.setdefault("HF_ENDPOINT", HF_MIRROR)
         self.model_size = model_size or os.environ.get("LISTENER_MODEL_SIZE", "medium")
         self.model_dir = (
@@ -211,6 +211,7 @@ class Listener:
                     logprob_threshold=-0.6,
                     compression_ratio_threshold=2.0,
                     beam_size=5,
+                    temperature=0.0,  # 避免随机性，保证同一音频每次转写结果一致
                 )
         except TypeError:
             # 旧版 faster-whisper 可能不支持 vad_parameters，降级重试

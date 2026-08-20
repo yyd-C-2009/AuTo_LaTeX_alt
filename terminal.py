@@ -22,7 +22,7 @@
     /help               显示本帮助
     /exit               退出
 
-普通文本会直接发送给当前 Agent；切换 Agent 只更换身份，不会删除当前分支历史。
+普通文本会直接发送给当前 Agent; 切换 Agent 只更换身份，不会删除当前分支历史。
 """
 
 import asyncio
@@ -69,7 +69,7 @@ HELP_TEXT = """===== terminal.py 多Agent直接对话终端 =====
   /whoami              查看当前分支与 Agent
   /help                显示本帮助
   /exit                退出
-普通文本会直接发送给当前 Agent；切换 Agent 只更换身份，不会删除当前分支历史。
+普通文本会直接发送给当前 Agent; 切换 Agent 只更换身份，不会删除当前分支历史。
 """
 
 
@@ -101,7 +101,7 @@ class TerminalSession:
     """维护当前 Agent、分支与对话历史。
 
     当前分支的实时消息统一放在 self.super_history 中（即使当前 Agent 不是 Super），
-    这样 build_super_tools 闭包引用的 list 始终是当前分支的实时消息；分支切换时保存/恢复
+    这样 build_super_tools 闭包引用的 list 始终是当前分支的实时消息; 分支切换时保存/恢复
     该 list 的深拷贝快照。切换 Agent 只替换 system prompt，不删除已有 user/assistant 历史。
     """
 
@@ -125,7 +125,7 @@ class TerminalSession:
     # ---------- 分支/身份管理 ----------
 
     def _set_agent_prompt(self, agent: str):
-        """替换当前消息列表的 system prompt 为指定 Agent 的 prompt；保留其余历史。"""
+        """替换当前消息列表的 system prompt 为指定 Agent 的 prompt; 保留其余历史。"""
         if self.super_history and self.super_history[0].get("role") == "system":
             self.super_history[0] = {"role": "system", "content": agent_prompt(agent)}
         else:
@@ -165,13 +165,13 @@ class TerminalSession:
         if name not in self.branches:
             return False, f"分支 {name!r} 不存在"
         if name == self.active_branch:
-            return False, "不能删除当前分支；请先 /branch switch 到其他分支"
+            return False, "不能删除当前分支; 请先 /branch switch 到其他分支"
         del self.branches[name]
         return True, f"已删除分支 {name}"
 
     def switch_agent(self, agent: str) -> tuple[bool, str]:
         if agent not in AVAILABLE_AGENTS:
-            return False, f"未知 Agent {agent!r}；可用：{', '.join(AVAILABLE_AGENTS)}"
+            return False, f"未知 Agent {agent!r}; 可用：{', '.join(AVAILABLE_AGENTS)}"
         # 切换身份只替换 system prompt，保留已有对话历史，绝不删除。
         self.branches[self.active_branch]["agent"] = agent
         self._set_agent_prompt(agent)
@@ -179,7 +179,7 @@ class TerminalSession:
         self.branches[self.active_branch]["messages"] = copy.deepcopy(self.super_history)
         self.runner = Agent(self.bus)  # 身份切换后重置 Agent 状态（pending/delayed_results）
         return True, (
-            f"已切换到直接对话 Agent：{agent}（当前分支 {self.active_branch} 的对话历史已保留；"
+            f"已切换到直接对话 Agent：{agent}（当前分支 {self.active_branch} 的对话历史已保留; "
             "可直接让 Super/PassageWrite 基于上面的历史进行记录）"
         )
 
@@ -367,7 +367,7 @@ class TerminalSession:
             ok, msg = self.remove_branch(cmdline[len("branch rm "):].strip())
             await self.bus.io_print(msg if ok else f"错误：{msg}")
             return
-        await self.bus.io_print(f"未知指令 /{cmdline}；输入 /help 查看帮助")
+        await self.bus.io_print(f"未知指令 /{cmdline}; 输入 /help 查看帮助")
 
     async def chat(self, user_text: str):
         agent = self.agent
