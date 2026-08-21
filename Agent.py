@@ -122,7 +122,7 @@ class Agent:
                     tool_choice="auto"
                 )
             except Exception as e:
-                debug_status(f"LLM请求异常: {str(e)}")
+                print(f"LLM请求异常: {str(e)}")
                 continue
 
             msg = resp.choices[0].message

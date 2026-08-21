@@ -367,6 +367,8 @@ async def main():
                                        transcript_provider=data["agent_listener"])
     register_resident_tools(tools, resident_manager)
 
+    bus.mark_slow(tasks=['transcribe_audio','recognize_doc'])
+
     await bus.io_print("===== Super 多Agent系统启动 (输入 \\exit() 退出) =====")
     try:
         while True:
