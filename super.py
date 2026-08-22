@@ -388,14 +388,6 @@ async def main():
     finally:
         renderer.shutdown()
 
-        messages.append({"role": "user", "content": requiry})
-        out = await super_agent.run_agent(
-            client, messages, MODEL,
-            deny_tools=LISTENER_STATEFUL_TOOLS,
-        )
-        if out:
-            await bus.io_print(f"[Super] {out}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
