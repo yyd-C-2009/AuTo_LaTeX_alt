@@ -30,6 +30,7 @@ class Bus():
     '''
     总线，负责消息的分发和订阅，所有模块间通信都通过总线进行，所有模块都可以订阅和发布消息。所有返回值均为Message格式
     外部函数从tools.async_execute接入系统
+    总结了所有可能的对外任务调用的接口
     '''
     EOWM  = Message('Task_end')         #End Of Work Mark
     def __init__(self,tools : Tools = None,max_concurrency:int = 5, renderer=None):
@@ -57,7 +58,6 @@ class Bus():
         # self._released_tasks = set()            # TODO: 高级特性——放弃任务集合，暂注释
         # —— 控制台 IO 锁（多 Agent 共享控制台时串行化输出/对话）——
         self._io_lock = asyncio.Lock()            # 带 input 的对话回合锁
-        # print(f'testttt{tools.tool_list}')
 
     def registry(self,event_name:str):          #事件注册
         if event_name not in self.handler:

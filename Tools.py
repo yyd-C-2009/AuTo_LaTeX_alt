@@ -139,11 +139,11 @@ def function_to_model(func: Callable):
 class Tools:
     '''工具注册表，工具必须返回dict'''
     def __init__(self):
-        self.tool_list = {}         #存储函数列表，便于调用
-        self.schema = []            #结构化描述文档，用于向API接口提供信息
+        self.tool_list = {}         # 存储函数列表，便于调用
+        self.schema = []            # 结构化描述文档，用于向API接口提供信息
+        self.dict_schema = {}       # 根据工具名称建立的映射式注册表, 用于更新后的鉴权系统
         self.timeout = {}
-        self.ensure = []            #保证大型工具不会被卸载
-        # self.model = []             #存储对应的model，没有实际作用
+        self.ensure = []            # 保证大型工具不会被卸载
 
     def _registry(self,func : Callable):
         schema = {
@@ -157,6 +157,7 @@ class Tools:
         
         self.tool_list[func.__name__] = func
         self.schema.append(schema)
+        self.dict_schema[func.__name__] = schema
 
         return None
 
@@ -180,6 +181,10 @@ class Tools:
 
         return decorater
 
+    def find_tool(self,name:str,tool_list:list) -> None:
+        if name in self.dict_schema:
+            tool_list.append(self.dict_schema[name])
+        return
 
     def execute(self,func_name:str,*args,**kwargs):
         if func_name in self.tool_list:
