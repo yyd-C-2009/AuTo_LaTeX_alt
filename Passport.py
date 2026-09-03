@@ -40,7 +40,7 @@ class Passport:
         self.capability[State.DONE] = 'None'
         return
 
-    def next_state(self,workflow:WorkFlow,if_checked:bool = True,):
+    def next_state(self,if_checked:bool = True,):
         '''向下一个状态转移, 为了保证不错过环节, 只设置规定的向下移动'''
         if if_checked:
             self.state = STATE_LIST[STATE_LIST.index(self.state) + 1]

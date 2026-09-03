@@ -40,7 +40,7 @@ class Content:
         return str(tmp_dict)
 
     def addition(self,your_task:str):
-        self.task_done = self.task_done.append(your_task)
+        self.task_done.append(your_task)
         return
 
     def inspect(self):
@@ -84,5 +84,4 @@ class WorkCapability:
 class WorkFlow():
     '''完整工作流管理器, 通过慢任务形式派发 Agent 工作, 通过 Task 完成任务推进, 进行运行鉴权触发'''
     def __init__(self):
-
         pass 
