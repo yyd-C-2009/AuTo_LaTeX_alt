@@ -12,6 +12,8 @@ from Saver import Saver
 from event_bus import Bus,Message
 from text_clean import text_clean
 from render import get_renderer
+from runtime.gateway import CapabilityGateway, UnauthorizedTool
+from runtime.passport import Passport
 import asyncio
 
 client = None
@@ -76,11 +78,19 @@ class Agent:
         model: str = 'deepseek-v4-pro', max_step: int = 5,
         tool_names: list[str] | None = None,
         deny_tools: list[str] | None = None,
+        gateway: CapabilityGateway | None = None,
+        passport: Passport | None = None,
     ) -> str | None:
         '''单轮次对话循环：驱动 LLM <-> 工具（快任务同步、慢任务异步提交+轮询）
         tool_names: 为 None 使用 bus.tools 全量 schema；给定列表则按名字过滤（schema 级工具子集）。
-        deny_tools: 需要从 schema 和执行层同时禁用的工具名列表（用于 Super 禁用有状态工具）。'''
+        deny_tools: 需要从 schema 和执行层同时禁用的工具名列表（用于 Super 禁用有状态工具）。
+        gateway + passport: 可选的新权限链路（runtime/，见 TASK.md Phase 1）。
+        传入后，schema 由 gateway.visible_schema(passport) 提供、工具经
+        gateway.execute(passport, ...) 授权执行；不传则走原 tool_names/deny_tools 逻辑（零行为变化）。'''
         steps = 0
+
+        # 新权限链路（可选，默认关闭以保持旧行为不变）
+        use_gateway = gateway is not None and passport is not None
 
         # 工具 schema（可选子集过滤，一次算好整轮复用）
         schema = self.bus.tools.schema if self.bus is not None else []
@@ -88,11 +98,15 @@ class Agent:
         # 否则只允许提交白名单内的工具（schema 级过滤只是「让专家看不见」，这里才是「调不动」）
         allow = set(tool_names) if tool_names is not None else None
         deny = set(deny_tools) if deny_tools is not None else None
-        if allow is not None:
-            # view_delayed_results 始终开放：每个 Agent 都能查看「自己的」延迟结果缓存
-            schema = [s for s in schema if s['function']['name'] in allow or s['function']['name'] == 'view_delayed_results']
-        if deny is not None:
-            schema = [s for s in schema if s['function']['name'] not in deny]
+        if use_gateway:
+            # 新路径：schema 由 CapabilityGateway 按 Passport 裁剪（visibility 参与过滤）
+            schema = gateway.visible_schema(passport)
+        else:
+            if allow is not None:
+                # view_delayed_results 始终开放：每个 Agent 都能查看「自己的」延迟结果缓存
+                schema = [s for s in schema if s['function']['name'] in allow or s['function']['name'] == 'view_delayed_results']
+            if deny is not None:
+                schema = [s for s in schema if s['function']['name'] not in deny]
         while steps < max_step:
             debug_status(f"step {steps}")
             steps += 1
@@ -168,7 +182,18 @@ class Agent:
                         debug_status(f"[鉴权拒绝] {func_name} 不在白名单")
                         continue
 
-                    result = await self.bus.submit(func_name=func_name, **kwargs)
+                    if use_gateway:
+                        # 新路径：经 CapabilityGateway 授权后执行（真正的执行边界）
+                        try:
+                            result = await gateway.execute(
+                                passport, self.bus.submit, func_name, **kwargs
+                            )
+                        except UnauthorizedTool as e:
+                            tool_call_add(messages, str(e), tool_called.id)
+                            debug_status(f"[Gateway 拒绝] {func_name}")
+                            continue
+                    else:
+                        result = await self.bus.submit(func_name=func_name, **kwargs)
 
                     if result.title in ('Done', 'Error'):
                         tool_call_add(messages, str(result.content), tool_called.id)
