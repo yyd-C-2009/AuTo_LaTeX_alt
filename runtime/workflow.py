@@ -7,11 +7,12 @@ Stage → Gateway.derive → 新的 Passport，实现「同一 Agent 不同阶�
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from runtime.context import TaskContext
 from runtime.gateway import CapabilityGateway
 from runtime.passport import Passport
+from runtime.task import Task, TaskStatus
 
 
 @dataclass
@@ -101,3 +102,39 @@ class Workflow:
             for t in sorted(needed)
         ]
         return gateway.derive(parent, grants, stage_id=stage.name)
+
+    # ------------------------------------------------------------------
+    # 顺序执行器（Phase 4 接线用，runner 可注入以便离线测试）
+    # ------------------------------------------------------------------
+    async def run(
+        self,
+        gateway: CapabilityGateway,
+        parent: Passport,
+        task: Task,
+        *,
+        runner: Callable | None = None,
+    ) -> list[Any]:
+        """逐阶段执行：每阶段 derive 一个窄化 passport，交给 runner 跑，结果传给下一阶段。
+
+        runner(stage: Stage, passport: Passport, task: Task, prev: list[Any]) -> Any，
+        默认抛 NotImplementedError（由上层注入真实专家调度；离线测试传 fake）。
+        """
+        current: Optional[Stage] = None
+        prev: list[Any] = []
+        results: list[Any] = []
+        while True:
+            stage = self.next_stage(current)
+            if stage is None:
+                break
+            passport = self.derive_passport(gateway, parent, stage)
+            out = await (runner or _noop_runner)(stage, passport, task, prev)
+            results.append(out)
+            prev = [out]
+            current = stage.name
+        task.mark(TaskStatus.DONE)
+        return results
+
+
+async def _noop_runner(stage, passport, task, prev):
+    raise NotImplementedError("run_workflow 需要注入真实 runner（或测试 fake）")
+

@@ -24,6 +24,9 @@ from str_replace_editor import str_replace_editor
 from built_in_tool import web_search, web_fetch,get_weather
 from resident import ResidentManager, register_resident_tools
 from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
+from runtime.task import new_task
+from runtime.context import TaskContext
+from runtime.workflow import Stage, Workflow
 
 MODEL = "deepseek-v4-flash"
 BASE_URL = "https://api.deepseek.com" # https://api.llm.ustc.edu.cn/v1 or https://api.deepseek.com
@@ -192,6 +195,22 @@ def _dialogue_context(messages: list, limit: int = 50) -> str:
     return "\n".join(lines[-limit:]) if lines else ""
 
 
+def build_task_context(task: str, holder: str | None = None, history: str = "") -> TaskContext:
+    """Phase 3 接线: 把一次专家调用包装成结构化 Task + TaskContext。
+
+    goal=task, holder=专家名; 有对话历史时作为 previous_results 注入 (PassageWrite 总结对话依赖)。
+    brief() 输出即专家可读摘要, 逐步替代纯文本 _dialogue_context 拼接。
+    """
+    t = new_task(task, holder=holder)
+    ctx = TaskContext(task_id=t.id, goal=task, holder=holder)
+    if history:
+        ctx.previous_results.append(
+            "Super 与用户的对话历史 (作为背景参考；若任务要求总结对话, 须据此为准, 且不要逐字复述) :\n"
+            + history
+        )
+    return ctx
+
+
 def write_latex(content: Annotated[str, "要写入的LaTeX内容"], filename: Annotated[str, "文件名(可省略)"] = "output.tex") -> str:
     '''将LaTeX内容写入 latex_output/ 目录下的 .tex 文件, 返回保存路径'''
     name = os.path.basename(filename) or "output.tex"
@@ -264,12 +283,13 @@ def check_latex(filename: Annotated[str, "要检查语法的 .tex 文件名 (位
 # Super 调用 run_agent 时 tool_names=None, 保留全量调度权。
 
 
-def build_super_tools(bus: Bus, client, conversation_history: list) -> Tools:
+def build_super_tools(bus: Bus, client, conversation_history: list, gateway: CapabilityGateway | None = None) -> Tools:
     '''把每个专家注册为 bus.tools 上的工具函数 (标记为 slow_task) ,
     Super 调用专家时走异步慢任务机制 (挂 pending、占用 IO 锁、等输入时挂起) 。
     专家内部: 独立 Agent 实例 + 独立 messages + 共享 client + 共享 bus.tools。
     conversation_history: Super 的 messages 列表引用, 专家被调用时提取其中的
-    「用户 ↔ Super 纯文本对话」作为上下文注入, 打通 PassageWrite 总结对话的数据通路。'''
+    「用户 ↔ Super 纯文本对话」作为上下文注入, 打通 PassageWrite 总结对话的数据通路。
+    gateway: 传入时额外注册 run_workflow 顺序执行器 (Phase 3+4 接线) 。'''
     super_tools = bus.tools
 
     for name, (prompt, tool_names) in EXPERTS.items():
@@ -279,15 +299,11 @@ def build_super_tools(bus: Bus, client, conversation_history: list) -> Tools:
             _name: str = name,
             _names: list = tool_names,   # 专家工具子集 (下划线参数不进 schema, LLM 无法篡改)
         ) -> str:
-            # 提取 Super 与用户的纯文本对话历史, 注入为上下文 (PassageWrite 总结对话依赖它)
+            # 提取 Super 与用户的纯文本对话历史, 装进结构化 TaskContext (PassageWrite 总结对话依赖它) 。
+            # Phase 3 接线: 每次专家调用都对应一个新 Task + TaskContext, 专家上下文取 ctx.brief()。
             history = _dialogue_context(conversation_history)
-            user_content = task
-            if history:
-                user_content = (
-                    "以下是 Super 与用户的对话历史 (作为背景参考；若任务要求总结对话, 须据此为准, 且不要逐字复述) : \n"
-                    f"{history}\n\n"
-                    f"【当前任务】{task}"
-                )
+            ctx = build_task_context(task, holder=_name, history=history)
+            user_content = ctx.brief()
             msgs = [
                 {"role": "system", "content": _prompt},
                 {"role": "user", "content": user_content},
@@ -307,6 +323,60 @@ def build_super_tools(bus: Bus, client, conversation_history: list) -> Tools:
         bus.mark_slow([f"{name}_expert"])
         # 专家内部会再 submit 工具: 标记为可重入 (执行时不占用 semaphore, 避免自我死锁)
         bus.mark_reentrant([f"{name}_expert"])
+
+    # Phase 4 接线: 把 run_workflow 顺序执行器注册成 Super 可调用的工具。
+    if gateway is not None:
+        async def run_workflow(
+            goal: Annotated[str, "工作流目标（要完成什么）"],
+            stage_tasks: Annotated[list, "有序阶段列表；每项为 {'expert': str, 'task': str}"],
+        ) -> str:
+            """按阶段顺序调用多个专家完成一个目标：每阶段派发一个专家并派生阶段 passport（能力只收不扩），
+            上一阶段结果作为下一阶段背景传入，最后汇总返回。"""
+            task = new_task(goal, holder="super")
+            # 阶段名编码专家名，便于 runner 反查（Stage 本身不携带 expert 语义）
+            stage_experts = {}
+            stages = []
+            for i, step in enumerate(stage_tasks):
+                e = step.get("expert", "")
+                if e not in EXPERTS:
+                    return f"未知专家 {e!r}；可用：{', '.join(EXPERTS)}"
+                stage_name = f"stage-{i}-{e}"
+                stage_experts[stage_name] = e
+                stages.append(Stage(name=stage_name, tools=tuple(EXPERTS[e][1])))
+            wf = Workflow(name=f"wf-{task.id}", stages=stages)
+
+            # 父 passport = Super 全量调度权（tool_names=None → 仅 deny，无白名单）
+            parent = LegacyPolicyAdapter(gateway).to_passport("super")
+
+            async def _run_stage(stage, passport, task_obj, prev):
+                e = stage_experts[stage.name]
+                prompt, _names = EXPERTS[e]
+                ctx = build_task_context(task_obj.goal, holder=e)
+                if prev:
+                    ctx.previous_results.append("上一阶段结果:\n" + str(prev[0]))
+                msgs = [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": ctx.brief()},
+                ]
+                sub_agent = Agent(bus)
+                out = await sub_agent.run_agent(
+                    client, msgs, MODEL,
+                    gateway=gateway, passport=passport,
+                )
+                return out or ""
+
+            results = await wf.run(gateway, parent, task, runner=_run_stage)
+            lines = [f"工作流 {task.id} 完成，共 {len(stages)} 阶段："]
+            for i, r in enumerate(results, 1):
+                lines.append(f"[阶段{i}] {r}")
+            return "\n".join(lines)
+
+        run_workflow.__doc__ = "按阶段顺序执行多专家工作流；每项 stage_tasks 指定 expert 与 task。"
+        super_tools.add_tool(run_workflow, time_out=600)
+        bus.mark_slow(["run_workflow"])
+        # 内部会再 submit 专家工具：标记可重入，否则 run_workflow 持有 semaphore
+        # 时子 Agent 调工具会「持锁等锁」死锁（与专家同理）。
+        bus.mark_reentrant(["run_workflow"])
 
     return super_tools
 
@@ -368,13 +438,18 @@ async def main():
     bus = Bus(tools, max_concurrency=4, renderer=renderer)
     bus.mark_dangerous(["delete_memory", "replace_memory"])  # Agent 调用这两个工具前必须 y/n 确认
 
+    # CapabilityGateway + LegacyAdapter (Phase 1/3+4 接线): 专家调度 / run_workflow 走 gateway 授权
+    gateway = CapabilityGateway()
+    for name in tools.tool_list:
+        gateway.register_tool(name, schema=tools.dict_schema[name])
+
     # Super 自己也是一个 Agent (只负责路由, 不负责具体读写)
     super_agent = Agent(bus)
     messages = [{"role": "system", "content": SUPER_PROMPT}]
 
     # 专家工具注册进 bus.tools (标记为 slow_task, Super 调用时异步化) ；
     # 传入 messages 引用, 让专家被调用时能读到「用户 ↔ Super」对话历史 (PassageWrite 总结对话的数据通路)
-    build_super_tools(bus, client, messages)
+    build_super_tools(bus, client, messages, gateway)
     # 记忆工具已在上方注册 (见 tools.add_tool(add_memory/retrieve_context)) , Super 复盘直接使用；
     # 切勿重复 add_tool: 同名工具会重复出现在 schema 中 (历史 bug, 已修复)
 

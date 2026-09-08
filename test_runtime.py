@@ -211,6 +211,54 @@ def test_workflow_sequential_and_derive():
     assert g.authorize(pp_write, "view") is False
 
 
+def test_workflow_executor_offline():
+    g = make_gateway()  # view / check_latex / write_latex / delete_memory
+    parent = g.issue("super", [
+        CapabilityGrant(Capability(nm), ToolPolicy(permission="allow"))
+        for nm in ("view", "check_latex", "write_latex")
+    ])
+    task = new_task("离线工作流", holder="super")
+
+    wf = Workflow(name="OfflineWf", stages=[
+        Stage("s1", tools=("view",)),
+        Stage("s2", tools=("write_latex", "check_latex")),
+        Stage("s3", tools=("check_latex",)),
+    ])
+
+    calls = []
+
+    async def fake_runner(stage, passport, task_obj, prev):
+        calls.append((stage.name, stage.tools, prev))
+        return f"out-{stage.name}"
+
+    results = asyncio.run(wf.run(g, parent, task, runner=fake_runner))
+
+    # 顺序推进: s1 → s2 → s3
+    assert [c[0] for c in calls] == ["s1", "s2", "s3"]
+    # 每阶段派生 passport 已窄化: s1 只允许 view
+    assert g.authorize(wf.derive_passport(g, parent, wf.stages[0]), "view") is True
+    assert g.authorize(wf.derive_passport(g, parent, wf.stages[0]), "write_latex") is False
+    # 结果按序传递: 下一阶段 prev 收到上一阶段输出
+    assert calls[1][2] == ["out-s1"]
+    assert calls[2][2] == ["out-s2"]
+    # 全部完成后 task 状态为 DONE
+    assert task.status is TaskStatus.DONE
+
+
+def test_task_context_in_expert_wiring():
+    # 直接构造专家调度会用的 TaskContext, 验证 brief 含关键字段 (不改真实 LLM 路径)
+    ctx = TaskContext(
+        task_id="task-1",
+        goal="把公式整理成 LaTeX",
+        holder="mathwrite",
+        previous_results=["Super 与用户的对话历史: 用户问公式"],
+    )
+    b = ctx.brief()
+    assert "把公式整理成 LaTeX" in b
+    assert "mathwrite" in b
+    assert "对话历史" in b
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

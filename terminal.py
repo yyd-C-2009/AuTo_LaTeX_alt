@@ -36,6 +36,7 @@ from Tools import Tools
 from initer import init
 from render import TerminalRenderer, set_renderer
 from resident import ResidentManager, register_resident_tools
+from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
 from super import (
     SUPER_PROMPT,
     EXPERTS,
@@ -401,6 +402,11 @@ async def main():
     bus = Bus(tools, max_concurrency=4, renderer=renderer)
     bus.mark_dangerous(["delete_memory", "replace_memory", "add_memory"])  # Agent 调用这几个工具前必须 y/n 确认
 
+    # CapabilityGateway + LegacyAdapter (与 super.py 同构): run_workflow 走 gateway 授权
+    gateway = CapabilityGateway()
+    for name in tools.tool_list:
+        gateway.register_tool(name, schema=tools.dict_schema[name])
+
     # Listener 事件桥：后台转写线程通过 bus.emit_threadsafe 唤醒常驻 Agent。
     data["agent_listener"].attach_bus(bus, asyncio.get_running_loop())
     resident_manager = ResidentManager(
@@ -414,7 +420,7 @@ async def main():
     # 注册专家工具（math_expert 等），让 Super 身份也能路由专家。
     # 传入 session.super_history 作为稳定的对话历史引用：Super 切换分支时通过
     # super_history[:] 原地更新，专家工具始终读取当前 Super 分支的对话。
-    build_super_tools(bus, client, session.super_history)
+    build_super_tools(bus, client, session.super_history, gateway)
 
     await bus.io_print("===== terminal.py 多Agent直接对话终端（输入 /help 查看指令，/exit 退出）=====")
     try:

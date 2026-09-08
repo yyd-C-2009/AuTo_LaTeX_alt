@@ -253,32 +253,6 @@ class Agent:
         return None
 
 
-
-    async def agent(self, max_step: int = 5,
-                    system_prompt: str = (
-                        "你是严谨的智能助手。调用工具时，如果缺少必要参数，请在对应位置留空，反问用户补充，"
-                        "绝不猜测或虚构。若工具返回错误，你必须根据错误描述调整参数后再试。"
-                    ),
-                    model: str = "deepseek-v4-flash-ascend",
-                    base_url: str = "https://api.llm.ustc.edu.cn/v1/"):
-        key = os.environ.get("DSH_OPENAI_KEY")
-        if not key:
-            raise RuntimeError("缺少环境变量 DSH_OPENAI_KEY")
-        async_client = openai.AsyncOpenAI(api_key=key, base_url=base_url, timeout=60.0)
-        messages = [{"role": "system", "content": system_prompt}]
-
-        while True:
-            # messages = message_cutter(messages)
-            requiry = await asyncio.create_task(asyncio.to_thread(input))
-            if requiry == "\\exit()":
-                return None
-
-            messages.append({"role": "user", "content": requiry})
-            out = await self.run_agent(async_client, messages, model, max_step)
-            if out:
-                print(out)
-
-
 # class Agent_core():
 #     '''
 #     真实的工具调用入口（当前形态）：被 Super 通过 bus 路由调用，被动执行一个工具。
