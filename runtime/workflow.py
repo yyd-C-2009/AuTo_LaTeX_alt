@@ -33,8 +33,22 @@ class Stage:
             raise ValueError("Stage.name 必须为非空字符串")
         object.__setattr__(self, "capabilities", tuple(self.capabilities or ()))
         object.__setattr__(self, "tools", tuple(self.tools or ()))
-        if not self.capabilities and not self.tools:
-            raise ValueError(f"Stage {self.name!r} 至少需要 capabilities 或 tools 之一")
+        # 允许两者皆空：纯控制阶段（如 CommitCursor）不授权任何工具，
+        # 只做提交/回滚决策，派生出的 Passport 也就没有任何 grant。
+
+
+class StageAbort(Exception):
+    """阶段中止：runner 判定本阶段的验收条件未满足时抛出。
+
+    中止后 Workflow.run 不再推进后续阶段，并把 task 标记为 FAILED，
+    以便调用方回滚副作用（例如 Resident 不推进 Listener 游标）。
+    与普通异常的区别：这是「按预期判定失败」，不是「运行时出错」。
+    """
+
+    def __init__(self, stage_name: str, reason: str = ""):
+        self.stage_name = stage_name
+        self.reason = reason
+        super().__init__(f"阶段 {stage_name} 中止：{reason}" if reason else f"阶段 {stage_name} 中止")
 
 
 @dataclass
@@ -122,15 +136,25 @@ class Workflow:
         current: Optional[Stage] = None
         prev: list[Any] = []
         results: list[Any] = []
-        while True:
-            stage = self.next_stage(current)
-            if stage is None:
-                break
-            passport = self.derive_passport(gateway, parent, stage)
-            out = await (runner or _noop_runner)(stage, passport, task, prev)
-            results.append(out)
-            prev = [out]
-            current = stage.name
+        task.mark(TaskStatus.RUNNING)
+        try:
+            while True:
+                stage = self.next_stage(current)
+                if stage is None:
+                    break
+                passport = self.derive_passport(gateway, parent, stage)
+                out = await (runner or _noop_runner)(stage, passport, task, prev)
+                results.append(out)
+                prev = [out]
+                current = stage.name
+        except StageAbort:
+            # 验收失败：标记 FAILED 后向上抛出，让调用方回滚副作用
+            # （如 Resident 不推进 Listener 游标）。已完成的阶段结果不返回。
+            task.mark(TaskStatus.FAILED)
+            raise
+        except Exception:
+            task.mark(TaskStatus.FAILED)
+            raise
         task.mark(TaskStatus.DONE)
         return results
 

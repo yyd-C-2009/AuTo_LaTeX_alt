@@ -16,7 +16,77 @@ from runtime.gateway import (
 from runtime.passport import Passport
 from runtime.task import TaskStatus, new_task
 from runtime.context import TaskContext
-from runtime.workflow import Stage, Workflow
+from runtime.workflow import Stage, StageAbort, Workflow
+from event_bus import Message
+from resident import ResidentAgent, build_lecture_note_workflow
+
+
+class FakeToolBox:
+    """最小 tools 替身：只实现 bus.submit 落到工具所需的 tool_list。"""
+
+    def __init__(self, check_latex_fn):
+        self.tool_list = {"check_latex": check_latex_fn}
+
+
+class DummyBus:
+    """常驻 Agent 的离线替身总线。
+
+    提供真实 CapabilityGateway（含 check_latex 工具），并实现 submit 以
+    驱动 gateway.execute —— 这样测试覆盖的是真实的授权+执行链路，
+    而不是把 gateway 绕过去。
+    """
+
+    def __init__(self, check_latex_result: str = "语法检查通过"):
+        self.check_latex_calls = 0
+        self._check_latex_result = check_latex_result
+        self.gateway = CapabilityGateway()
+        for name in (
+            "get_listen_result",
+            "get_listen_cursor",
+            "write_latex",
+            "check_latex",
+            "str_replace_editor",
+            "view_theorem_style",
+            "retrieve_context",
+        ):
+            self.gateway.register_tool(name, schema={"function": {"name": name}})
+        self.tools = FakeToolBox(self._check_latex_stub)
+
+    def _check_latex_stub(self, filename: str = "notes.tex") -> str:
+        self.check_latex_calls += 1
+        self.last_checked_filename = filename
+        return self._check_latex_result
+
+    def on(self, *args, **kwargs):
+        return None
+
+    def off(self, *args, **kwargs):
+        return None
+
+    def io_status(self, *args, **kwargs):
+        return None
+
+    async def io_print(self, *args, **kwargs):
+        return None
+
+    async def submit(self, func_name, **kwargs):
+        """模拟 bus.submit 的 Done 包装，供 gateway.execute 调用。"""
+        if func_name == "check_latex":
+            return Message(title="Done", content=self._check_latex_stub(**kwargs))
+        return Message(title="Done", content=f"stub:{func_name}")
+
+
+class FakeTranscriptProvider:
+    def __init__(self, cursor: int = 5):
+        self.cursor = cursor
+
+    def get_listen_cursor(self) -> str:
+        return str(self.cursor)
+
+    def get_listen_result(self, include_timestamps: bool = False, since_index: int = 0) -> str:
+        if since_index < self.cursor:
+            return "新增一段课堂内容"
+        return "（暂无新增转写）"
 
 
 def make_gateway() -> CapabilityGateway:
@@ -243,6 +313,118 @@ def test_workflow_executor_offline():
     assert calls[2][2] == ["out-s2"]
     # 全部完成后 task 状态为 DONE
     assert task.status is TaskStatus.DONE
+
+
+def test_resident_cursor_commits_only_after_verification():
+    """Phase 5 核心不变量：Listener 游标只在 check_latex 验收通过后推进。
+
+    三种情形都必须覆盖，否则「验收门」可能形同虚设：
+      ① check_latex 通过           → 游标推进
+      ② check_latex 失败           → 游标不动（下次唤醒重放同一段转写）
+      ③ write_notes 阶段 LLM 异常  → 游标不动
+    """
+
+    async def run_case(check_latex_result, llm_raises=False):
+        provider = FakeTranscriptProvider(cursor=5)
+        bus = DummyBus(check_latex_result=check_latex_result)
+        ra = ResidentAgent(
+            name="notetaker",
+            agent_type="notetaker",
+            bus=bus,
+            client=None,
+            model="dummy",
+            prompt="notetaker",
+            tool_names=["get_listen_result", "get_listen_cursor", "write_latex", "check_latex"],
+            interval_sec=30,
+            transcript_provider=provider,
+            gateway=bus.gateway,
+            workflow=build_lecture_note_workflow(),
+        )
+        ra.last_cursor = 0
+
+        async def fake_run_agent(*args, **kwargs):
+            if llm_raises:
+                raise RuntimeError("LLM 侧失败")
+            return "已更新笔记"
+
+        ra.agent.run_agent = fake_run_agent  # type: ignore
+        await ra._tick()
+        return ra, bus
+
+    # ① 验收通过 → 游标提交到本轮 observe 到的游标
+    ra_ok, bus_ok = asyncio.run(run_case("语法检查通过 (未发现 LaTeX 语法错误)"))
+    assert ra_ok.last_cursor == 5, "验收通过后游标应推进"
+    assert bus_ok.check_latex_calls >= 1, "验收阶段必须真的调用过 check_latex"
+
+    # ② 验收失败 → 游标保持不动
+    ra_fail, bus_fail = asyncio.run(run_case("语法检查失败: \n! Undefined control sequence."))
+    assert ra_fail.last_cursor == 0, "check_latex 未通过时游标绝不能推进"
+    assert bus_fail.check_latex_calls >= 1, "失败分支也真的检查过"
+
+    # ③ LLM 阶段异常 → 游标保持不动
+    ra_err, _ = asyncio.run(run_case("语法检查通过", llm_raises=True))
+    assert ra_err.last_cursor == 0, "写入阶段异常时游标绝不能推进"
+
+
+def test_resident_workflow_stage_authorizations():
+    """LectureNoteTaking 的 stage passport 必须逐阶段收窄：
+    observe 不能写笔记、write_notes 不能提交游标、verify 只能 check_latex。"""
+    bus = DummyBus(check_latex_result="语法检查通过")
+    g = bus.gateway
+    wf = build_lecture_note_workflow()
+    parent = LegacyPolicyAdapter(g).to_passport(
+        "notetaker",
+        tool_names=["get_listen_result", "get_listen_cursor", "write_latex", "check_latex"],
+    )
+
+    observe = wf.derive_passport(g, parent, wf.stages[0])
+    assert g.authorize(observe, "get_listen_result") is True
+    assert g.authorize(observe, "write_latex") is False
+
+    write = wf.derive_passport(g, parent, wf.stages[1])
+    assert g.authorize(write, "write_latex") is True
+    assert g.authorize(write, "get_listen_result") is False
+
+    verify = wf.derive_passport(g, parent, wf.stages[2])
+    assert g.authorize(verify, "check_latex") is True
+    assert g.authorize(verify, "write_latex") is False
+
+    # commit_cursor 是纯控制阶段：不派生任何能力
+    commit = wf.derive_passport(g, parent, wf.stages[3])
+    assert commit.grants == ()
+    assert wf.stages[3].name == "commit_cursor"
+
+
+def test_workflow_abort_marks_task_failed():
+    """StageAbort 应停止后续阶段并把 task 标记为 FAILED（供调用方回滚副作用）。"""
+    g = make_gateway()
+    parent = g.issue("super", [
+        CapabilityGrant(Capability(nm), ToolPolicy(permission="allow"))
+        for nm in ("view", "write_latex")
+    ])
+    task = new_task("验收失败的工作流", holder="super")
+    wf = Workflow(name="AbortWf", stages=[
+        Stage("s1", tools=("view",)),
+        Stage("s2", tools=("write_latex",)),
+        Stage("s3", tools=("view",)),
+    ])
+
+    visited = []
+
+    async def aborting_runner(stage, passport, task_obj, prev):
+        visited.append(stage.name)
+        if stage.name == "s2":
+            raise StageAbort("s2", "验收未通过")
+        return f"out-{stage.name}"
+
+    try:
+        asyncio.run(wf.run(g, parent, task, runner=aborting_runner))
+        raise AssertionError("StageAbort 应向上抛出")
+    except StageAbort:
+        pass
+
+    assert visited == ["s1", "s2"], "中止后不得再进入后续阶段"
+    assert task.status is TaskStatus.FAILED
 
 
 def test_task_context_in_expert_wiring():

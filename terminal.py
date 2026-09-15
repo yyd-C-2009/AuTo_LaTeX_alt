@@ -35,7 +35,7 @@ from event_bus import Bus
 from Tools import Tools
 from initer import init
 from render import TerminalRenderer, set_renderer
-from resident import ResidentManager, register_resident_tools
+from resident import ResidentManager, register_resident_tools, build_lecture_note_workflow
 from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
 from super import (
     SUPER_PROMPT,
@@ -413,6 +413,8 @@ async def main():
         bus, client, MODEL,
         agent_specs=EXPERTS,
         transcript_provider=data["agent_listener"],
+        gateway=gateway,
+        workflows={"notetaker": build_lecture_note_workflow()},
     )
     register_resident_tools(bus.tools, resident_manager)
 

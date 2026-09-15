@@ -22,7 +22,7 @@ from initer import init
 from render import TerminalRenderer, set_renderer
 from str_replace_editor import str_replace_editor
 from built_in_tool import web_search, web_fetch,get_weather
-from resident import ResidentManager, register_resident_tools
+from resident import ResidentManager, register_resident_tools, build_lecture_note_workflow
 from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
 from runtime.task import new_task
 from runtime.context import TaskContext
@@ -457,7 +457,9 @@ async def main():
     data["agent_listener"].attach_bus(bus, asyncio.get_running_loop())
     # 常驻 Agent 管理器：Super 可用 start_resident_agent / stop_resident_agent / resident_status。
     resident_manager = ResidentManager(bus, client, MODEL, agent_specs=EXPERTS,
-                                       transcript_provider=data["agent_listener"])
+                                       transcript_provider=data["agent_listener"],
+                                       gateway=gateway,
+                                       workflows={"notetaker": build_lecture_note_workflow()})
     register_resident_tools(tools, resident_manager)
 
     bus.mark_slow(tasks=['transcribe_audio','recognize_doc'])
