@@ -37,15 +37,9 @@ from initer import init
 from render import TerminalRenderer, set_renderer
 from resident import ResidentManager, register_resident_tools, build_lecture_note_workflow
 from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
-from super import (
-    SUPER_PROMPT,
-    EXPERTS,
-    MODEL,
-    LISTENER_STATEFUL_TOOLS,
-    build_client,
-    build_super_tools,
-    register_common_tools,
-)
+from config import MODEL
+from experts import SUPER_PROMPT, EXPERTS, LISTENER_STATEFUL_TOOLS
+from tools_registry import build_client, build_super_tools, register_common_tools
 
 AVAILABLE_AGENTS = ["super"] + list(EXPERTS.keys())
 
