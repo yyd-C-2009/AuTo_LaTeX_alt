@@ -1,6 +1,7 @@
 import os
-os.environ['ORT_PROVIDERS'] = 'DmlExecutionProvider,CPUExecutionProvider'
-os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')  # 无 HF 环境时默认走 hf-mirror 中文镜像下载 Pix2Text 模型
+from config import require
+os.environ['ORT_PROVIDERS'] = ','.join(require('models.onnx_providers'))
+os.environ.setdefault('HF_ENDPOINT', require('models.huggingface_endpoint'))
 import asyncio,re
 from pix2text import Pix2Text
 import io
@@ -12,7 +13,7 @@ import fitz
 from PIL import Image
 import onnxruntime
 
-OCR_CACHE_DIR = "OCR_result"   # OCR 结果缓存目录：按「文件名 + 内容 md5」长期保存识别结果
+OCR_CACHE_DIR = require("paths.ocr_cache")
 
 def LaTeX_math_get(_string:str) -> dict[str,]:
     display_formula = re.findall(r'\$\$(.*?)\$\$',_string,re.DOTALL)
@@ -30,8 +31,9 @@ def LaTeX_math_get(_string:str) -> dict[str,]:
 class Visal:
     ''' Visal 类用于处理图像识别任务，使用 Pix2Text 模型进行图像到文本的转换。持有全局唯一p2t对象，避免重复加载模型。'''
     def __init__(self):
-        os.environ['ORT_PROVIDERS'] = 'DmlExecutionProvider,CPUExecutionProvider'
-        self.p2t = Pix2Text(device='cpu',use_fast = True,providers=['DmlExecutionProvider', 'CPUExecutionProvider'])  # 强制CPU模式, 单线程处理加载
+        providers = require("models.onnx_providers")
+        os.environ['ORT_PROVIDERS'] = ','.join(providers)
+        self.p2t = Pix2Text(device=require("models.ocr_device"), use_fast=True, providers=providers)
         print("----------p2t loaded----------")
 
     def is_pdf(self,doc_path:str)->bool:

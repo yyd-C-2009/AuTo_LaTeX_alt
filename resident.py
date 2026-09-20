@@ -16,6 +16,7 @@ from runtime.context import TaskContext
 from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
 from runtime.task import ArtifactRef, new_task
 from runtime.workflow import Stage, StageAbort, Workflow
+from config import require
 
 # 笔记产物（notetaker 的唯一交付物）。check_latex 以 latex_output/ 为工作目录，
 # 因此这里区分「bus 工具参数用的文件名」与「文档/日志里展示的相对路径」。
@@ -71,10 +72,10 @@ class ResidentAgent:
         model: str,
         prompt: str,
         tool_names: list[str] | None,
-        interval_sec: float = 30.0,
+        interval_sec: float | None = None,
         deny_tools: list[str] | None = None,
         transcript_provider=None,
-        max_messages: int = 40,
+        max_messages: int | None = None,
         gateway: CapabilityGateway | None = None,
         workflow: Workflow | None = None,
         principal_id: str | None = None,
@@ -86,10 +87,10 @@ class ResidentAgent:
         self.model = model
         self.prompt = prompt
         self.tool_names = tool_names
-        self.interval_sec = max(1.0, float(interval_sec))
+        self.interval_sec = max(1.0, float(interval_sec if interval_sec is not None else require("runtime.resident_interval_seconds")))
         self.deny_tools = deny_tools
         self.transcript_provider = transcript_provider
-        self.max_messages = max_messages
+        self.max_messages = max_messages if max_messages is not None else require("runtime.resident_max_messages")
         self.gateway = gateway
         self.workflow = workflow
         self.principal_id = principal_id or agent_type
@@ -331,7 +332,7 @@ class ResidentManager:
         self.workflows = dict(workflows or {})
         self.residents: dict[str, ResidentAgent] = {}
 
-    async def start(self, agent_type: str, interval_sec: float = 30.0) -> str:
+    async def start(self, agent_type: str, interval_sec: float | None = None) -> str:
         agent_type = agent_type.strip()
         if agent_type not in self.agent_specs:
             return f"启动失败：未知 Agent 类型 {agent_type!r}；可用：{', '.join(self.agent_specs)}"
@@ -396,7 +397,7 @@ def register_resident_tools(tools, manager: ResidentManager) -> None:
 
     async def start_resident_agent(
         agent_type: Annotated[str, "要启动的常驻 Agent 类型"],
-        interval_sec: Annotated[float, "唤醒间隔秒数（默认 30）"] = 30.0,
+        interval_sec: Annotated[float | None, "唤醒间隔秒数；不填写时使用 settings.json"] = None,
     ) -> str:
         """启动一个常驻 Agent（如 notetaker 持续笔记）。"""
         return await manager.start(agent_type, interval_sec)

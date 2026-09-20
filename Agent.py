@@ -15,6 +15,7 @@ from render import get_renderer
 from runtime.gateway import CapabilityGateway, UnauthorizedTool
 from runtime.passport import Passport
 import asyncio
+from config import require
 
 client = None
 
@@ -75,7 +76,7 @@ class Agent:
 
     async def run_agent(self,
         async_client, messages: list,
-        model: str = 'deepseek-v4-pro', max_step: int = 5,
+        model: str | None = None, max_step: int | None = None,
         tool_names: list[str] | None = None,
         deny_tools: list[str] | None = None,
         gateway: CapabilityGateway | None = None,
@@ -87,6 +88,8 @@ class Agent:
         gateway + passport: 可选的新权限链路（runtime/，见 TASK.md Phase 1）。
         传入后，schema 由 gateway.visible_schema(passport) 提供、工具经
         gateway.execute(passport, ...) 授权执行；不传则走原 tool_names/deny_tools 逻辑（零行为变化）。'''
+        model = model or require("llm.model")
+        max_step = max_step if max_step is not None else require("runtime.agent_max_steps")
         steps = 0
 
         # 新权限链路（可选，默认关闭以保持旧行为不变）

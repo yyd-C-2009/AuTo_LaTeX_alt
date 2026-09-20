@@ -1,0 +1,7 @@
+{
+  "llm": {"model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com", "api_key_env": "DS_API_KEY", "timeout_seconds": 60},
+  "paths": {"latex_output": "latex_output", "tikz_output": "tikz_output", "ocr_cache": "OCR_result", "memory_database": "my_rag_db", "embedding_model": "models/bge-base-zh-v1.5"},
+  "models": {"huggingface_endpoint": "https://hf-mirror.com", "onnx_providers": ["DmlExecutionProvider", "CPUExecutionProvider"], "ocr_device": "cpu"},
+  "listener": {"model_size": "medium", "model_dir": "models/faster-whisper-medium", "device": "cpu", "compute_type": "float32", "language": "zh", "initial_prompt": "", "max_transcript_entries": 200, "rms_threshold": 0.01, "max_lag_seconds": 20.0, "drop_oldest_on_lag": true},
+  "runtime": {"agent_max_steps": 5, "expert_timeout_seconds": 180, "listener_expert_timeout_seconds": 1800, "workflow_timeout_seconds": 600, "resident_interval_seconds": 30, "resident_max_messages": 40}
+}

@@ -20,7 +20,8 @@ import queue
 import threading
 from typing import Annotated
 
-HF_MIRROR = "https://hf-mirror.com"
+from config import require
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -28,20 +29,21 @@ class Listener:
     """长生命周期监听器：持有 Faster-Whisper 模型，提供单文件转写与连续监听。"""
 
     def __init__(self, model_size: str | None = None, model_dir: str | None = None,
-                 device: str = "cpu", compute_type: str = "float32"):
-        os.environ.setdefault("HF_ENDPOINT", HF_MIRROR)
-        self.model_size = model_size or os.environ.get("LISTENER_MODEL_SIZE", "medium")
+                 device: str | None = None, compute_type: str | None = None):
+        os.environ.setdefault("HF_ENDPOINT", require("models.huggingface_endpoint"))
+        self.model_size = model_size or require("listener.model_size")
         self.model_dir = (
             model_dir
-            or os.environ.get("LISTENER_MODEL_DIR")
-            or os.path.join(BASE_DIR, "models", f"faster-whisper-{self.model_size}")
+            or os.path.join(BASE_DIR, require("listener.model_dir"))
         )
+        device = device or require("listener.device")
+        compute_type = compute_type or require("listener.compute_type")
 
         self.model = None
         self.load_error = None
         self.model_path = None
-        self.language = os.environ.get("LISTENER_LANGUAGE", "zh")  # 默认中文，避免噪声下语言检测乱跳
-        self.initial_prompt = os.environ.get("LISTENER_INITIAL_PROMPT", "")  # 默认不放中文提示词，避免被 Whisper 当作幻觉回显
+        self.language = require("listener.language")
+        self.initial_prompt = require("listener.initial_prompt")
         self._model_lock = threading.Lock()  # 必须在 __init__ 早期初始化，后续转写方法会使用
         try:
             from faster_whisper import WhisperModel
@@ -70,16 +72,14 @@ class Listener:
         self._listen_queue: "queue.Queue" = queue.Queue()
         self._listen_transcript: list[dict] = []
         self._listen_seq = 0  # 单调递增的转写条目序号；clear 只清列表不清序号，保证游标不倒退
-        self._max_transcript_entries = max(1, int(os.environ.get("LISTENER_MAX_TRANSCRIPT_ENTRIES", "200")))
-        self._rms_threshold = float(os.environ.get("LISTENER_RMS_THRESHOLD", "0.01"))
+        self._max_transcript_entries = max(1, int(require("listener.max_transcript_entries")))
+        self._rms_threshold = float(require("listener.rms_threshold"))
         # 连续监听"实时性"控制：
         #   _max_lag_sec   允许输出落后实时音频的最大秒数。超过该值时丢弃最旧的存量音频，
         #                 只转写最近的音频，避免"转写慢 → 队列越积越多 → 落后无上限"。
         #   _drop_oldest_on_lag  True=落后超标时丢弃旧音频强追实时；False=仅限制队列深度（仍会积压）。
-        self._max_lag_sec = float(os.environ.get("LISTENER_MAX_LAG_SEC", "20.0"))
-        self._drop_oldest_on_lag = os.environ.get("LISTENER_DROP_OLDEST_ON_LAG", "1") not in (
-            "", "0", "false", "False", "no",
-        )
+        self._max_lag_sec = float(require("listener.max_lag_seconds"))
+        self._drop_oldest_on_lag = bool(require("listener.drop_oldest_on_lag"))
         self._transcript_lock = threading.Lock()
         self.bus = None
         self.loop = None

@@ -21,7 +21,7 @@ from runtime.gateway import CapabilityGateway, LegacyPolicyAdapter
 from runtime.task import new_task
 from runtime.context import TaskContext
 from runtime.workflow import Stage, Workflow
-from config import BASE_URL, KEY_ID, MODEL
+from config import BASE_URL, KEY_ID, MODEL, require
 from experts import EXPERTS, view_expert_prompts
 from latex_tools import write_latex, check_latex, check_tikz, view_theorem_style
 
@@ -97,7 +97,7 @@ def build_super_tools(bus: Bus, client, conversation_history: list, gateway: Cap
         expert.__name__ = f"{name}_expert"
         expert.__doc__ = f"调用 {name} 专家处理任务, 传入具体任务描述。"
         # listener 需要等待长音频转写完成，超时放宽到 1800s；其余专家维持 180s。
-        expert_timeout = 1800 if name == "listener" else 180
+        expert_timeout = require("runtime.listener_expert_timeout_seconds") if name == "listener" else require("runtime.expert_timeout_seconds")
         super_tools.add_tool(expert, time_out=expert_timeout)
         # 关键: 把专家工具标记为慢任务, Super 调用时走异步慢任务机制
         bus.mark_slow([f"{name}_expert"])
@@ -152,7 +152,7 @@ def build_super_tools(bus: Bus, client, conversation_history: list, gateway: Cap
             return "\n".join(lines)
 
         run_workflow.__doc__ = "按阶段顺序执行多专家工作流；每项 stage_tasks 指定 expert 与 task。"
-        super_tools.add_tool(run_workflow, time_out=600)
+        super_tools.add_tool(run_workflow, time_out=require("runtime.workflow_timeout_seconds"))
         bus.mark_slow(["run_workflow"])
         # 内部会再 submit 专家工具：标记可重入，否则 run_workflow 持有 semaphore
         # 时子 Agent 调工具会「持锁等锁」死锁（与专家同理）。
@@ -194,7 +194,10 @@ def register_common_tools(tools: Tools, data: dict) -> Tools:
 
 
 def build_client() -> openai.AsyncOpenAI:
-    """创建共享的 AsyncOpenAI client（读取环境变量 DSH_OPENAI_KEY）。"""
+    """创建共享的 AsyncOpenAI client（密钥变量名来自 settings.json）。"""
+    api_key = os.environ.get(KEY_ID)
+    if not api_key:
+        raise RuntimeError(f"未设置 API 密钥环境变量 {KEY_ID!r}（见 settings.json 的 llm.api_key_env）")
     return openai.AsyncOpenAI(
-        api_key=os.environ[KEY_ID], base_url=BASE_URL, timeout=60.0
+        api_key=api_key, base_url=BASE_URL, timeout=require("llm.timeout_seconds")
     )
