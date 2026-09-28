@@ -8,11 +8,28 @@ Stage → Gateway.derive → 新的 Passport，实现「同一 Agent 不同阶�
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from pathlib import Path
+import hashlib
+import asyncio
 
 from runtime.context import TaskContext
 from runtime.gateway import CapabilityGateway
 from runtime.passport import Passport
 from runtime.task import Task, TaskStatus
+from config import require
+
+
+def _artifact_snapshot() -> dict[str, str]:
+    """记录受控产物目录中文件的哈希；仅用于审计，不替代阶段验收。"""
+    roots = (require("paths.latex_output"), require("paths.tikz_output"))
+    result = {}
+    for root in roots:
+        base = Path(root)
+        if base.exists():
+            for path in base.rglob("*"):
+                if path.is_file():
+                    result[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
 
 
 @dataclass
@@ -27,12 +44,14 @@ class Stage:
     name: str
     capabilities: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
+    instruction: str = ""
 
     def __post_init__(self):
         if not self.name or not isinstance(self.name, str):
             raise ValueError("Stage.name 必须为非空字符串")
         object.__setattr__(self, "capabilities", tuple(self.capabilities or ()))
         object.__setattr__(self, "tools", tuple(self.tools or ()))
+        object.__setattr__(self, "instruction", str(self.instruction or "").strip())
         # 允许两者皆空：纯控制阶段（如 CommitCursor）不授权任何工具，
         # 只做提交/回滚决策，派生出的 Passport 也就没有任何 grant。
 
@@ -127,6 +146,7 @@ class Workflow:
         task: Task,
         *,
         runner: Callable | None = None,
+        store=None,
     ) -> list[Any]:
         """逐阶段执行：每阶段 derive 一个窄化 passport，交给 runner 跑，结果传给下一阶段。
 
@@ -137,28 +157,57 @@ class Workflow:
         prev: list[Any] = []
         results: list[Any] = []
         task.mark(TaskStatus.RUNNING)
+        run_id = store.begin(task.id, self.name, task.goal) if store else None
         try:
             while True:
                 stage = self.next_stage(current)
                 if stage is None:
                     break
                 passport = self.derive_passport(gateway, parent, stage)
-                out = await (runner or _noop_runner)(stage, passport, task, prev)
+                stage_id = store.stage(run_id, stage.name) if store else None
+                before = _artifact_snapshot() if store else {}
+                try:
+                    out = await (runner or _noop_runner)(stage, passport, task, prev)
+                except asyncio.CancelledError:
+                    if store:
+                        store.finish_stage(stage_id, error="CancelledError: 工作流阶段被超时或外部操作取消")
+                    raise
+                except Exception as exc:
+                    if store:
+                        store.finish_stage(stage_id, error=f"{type(exc).__name__}: {exc}")
+                    raise
+                if store:
+                    store.finish_stage(stage_id, result=out)
+                    after = _artifact_snapshot()
+                    for path, checksum in after.items():
+                        if before.get(path) != checksum:
+                            kind = "latex" if path.endswith(".tex") else "file"
+                            store.add_artifact(run_id, stage_id, path, kind, checksum)
                 results.append(out)
                 prev = [out]
                 current = stage.name
+        except asyncio.CancelledError:
+            task.mark(TaskStatus.FAILED)
+            if store:
+                store.finish(run_id, "failed")
+            raise
         except StageAbort:
             # 验收失败：标记 FAILED 后向上抛出，让调用方回滚副作用
             # （如 Resident 不推进 Listener 游标）。已完成的阶段结果不返回。
             task.mark(TaskStatus.FAILED)
+            if store:
+                store.finish(run_id, "failed")
             raise
         except Exception:
             task.mark(TaskStatus.FAILED)
+            if store:
+                store.finish(run_id, "failed")
             raise
         task.mark(TaskStatus.DONE)
+        if store:
+            store.finish(run_id, "done")
         return results
 
 
 async def _noop_runner(stage, passport, task, prev):
     raise NotImplementedError("run_workflow 需要注入真实 runner（或测试 fake）")
-

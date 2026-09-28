@@ -57,7 +57,7 @@ class Saver:
         )
         print(f"已记忆 (ID: {doc_id[:8]}): {text[:20]}...")
 
-    # ---------- 5. 删除/替换（仅按 ID，避免 Agent 幻觉按文本删除相似内容） ----------
+    # ---------- 5. 删除/替换（精确定位，避免 Agent 幻觉按相似文本删除） ----------
     def get_memory_by_id(self, memory_id: str) -> dict | None:
         """按 ID 查询记忆，返回 {id,text,metadata} 或 None。"""
         if not memory_id:
@@ -78,18 +78,32 @@ class Saver:
             "metadata": metas[0] if metas else None,
         }
 
-    def delete_memory(self, memory_id: str, exact_text: str) -> str:
-        """按 ID + 精确文本 删除记忆。必须同时提供精确 ID 与完全一致的文本，避免误删相似内容。"""
-        old = self.get_memory_by_id(memory_id)
+    def delete_memory(self, memory_id: str = "", *, exact_text: str) -> str:
+        """按精确文本删除记忆；memory_id 可省略，省略时由精确文本安全推导。"""
+        if not exact_text:
+            return "删除失败：必须提供完全一致的精确文本。"
+
+        derived_id = self.get_stable_id(exact_text)
+        memory_id = (memory_id or "").strip().lower()
+        if memory_id and memory_id != derived_id:
+            return (
+                "删除失败：提供的 ID 与精确文本不匹配；"
+                "未删除任何记忆。请使用检索结果中的完整 ID，或省略 memory_id。"
+            )
+
+        # ID 是精确文本的确定性 MD5；即使由文本推导，仍须读回原文逐字核验，
+        # 不能退化为相似度检索后删除。
+        target_id = memory_id or derived_id
+        old = self.get_memory_by_id(target_id)
         if old is None:
-            return f"删除失败：ID {memory_id} 不存在。"
+            return f"删除失败：ID {target_id} 不存在。"
         if old.get("text", "") != exact_text:
             return (
-                "删除失败：文本不匹配。必须同时提供精确 ID 与完全一致的文本才能删除；"
+                "删除失败：文本不匹配。必须提供与库中内容完全一致的文本才能删除；"
                 f"库中该 ID 对应文本为：{old.get('text', '')[:80]}"
             )
-        self.collection.delete(ids=[memory_id])
-        return f"已删除记忆（ID: {memory_id[:8]}）：{old['text'][:50]}"
+        self.collection.delete(ids=[target_id])
+        return f"已删除记忆（ID: {target_id[:8]}）：{old['text'][:50]}"
 
     def replace_memory(self, memory_id: str, old_text: str, new_text: str, metadata: dict = None) -> str:
         """按 ID + 旧文本精确匹配后替换：删除旧 ID，以新文本生成新 ID 写入（保持 ID=MD5(text)）。"""
@@ -116,7 +130,7 @@ class Saver:
 
     # ---------- 6. 检索（保留原逻辑，但确保注入时去重） ----------
     def retrieve_context(self,query: str, top_k: int = 3) -> str:
-        '''查询历史记忆，如果对命令有任何不理解或者对要求有任何疑问，请先查阅记忆'''
+        '''查询历史记忆，返回完整 memory_id 与文本，供后续精确删除或替换'''
         if self.collection.count() == 0:
             return 'No data'
         results = self.collection.query(
@@ -124,9 +138,18 @@ class Saver:
             n_results=top_k
         )
         if results['documents'] and results['documents'][0]:
-            # 利用 set 去重（虽然ID已保证，但防御性编程）
-            unique_docs = list(dict.fromkeys(results['documents'][0]))
-            return "\n---\n".join(unique_docs)
+            docs = results['documents'][0]
+            ids = (results.get('ids') or [[]])[0]
+            # 按文本去重，同时保留与每条文本严格对应的完整 ID。
+            entries = []
+            seen_docs = set()
+            for index, doc in enumerate(docs):
+                if doc in seen_docs:
+                    continue
+                seen_docs.add(doc)
+                memory_id = ids[index] if index < len(ids) else self.get_stable_id(doc)
+                entries.append(f"[memory_id: {memory_id}]\n{doc}")
+            return "\n---\n".join(entries)
         return "No data"
 
     # ---------- 7. 查看全部记忆（terminal.py 的 /db 命令使用，不注册为 Agent 工具） ----------

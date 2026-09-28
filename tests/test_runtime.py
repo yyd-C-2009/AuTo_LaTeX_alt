@@ -6,6 +6,11 @@ derive 不扩权 / Task 状态机 / Workflow 顺序 Stage 派生。
 """
 
 import asyncio
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from runtime.capability import Capability, CapabilityGrant, ToolPolicy
 from runtime.gateway import (
@@ -19,6 +24,7 @@ from runtime.context import TaskContext
 from runtime.workflow import Stage, StageAbort, Workflow
 from event_bus import Message
 from resident import ResidentAgent, build_lecture_note_workflow
+from Agent import Agent, AgentStepLimitError, LLMRequestError
 
 
 class FakeToolBox:
@@ -75,6 +81,63 @@ class DummyBus:
             return Message(title="Done", content=self._check_latex_stub(**kwargs))
         return Message(title="Done", content=f"stub:{func_name}")
 
+
+class AgentLoopBus:
+    """只用于 Agent 请求循环测试的最小总线。"""
+
+    def __init__(self):
+        self.tools = SimpleNamespace(schema=[])
+
+
+def _fake_client(create):
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+
+def test_agent_stops_after_consecutive_request_failures():
+    calls = 0
+
+    async def always_fails(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise ConnectionError("offline")
+
+    agent = Agent(AgentLoopBus())
+    try:
+        asyncio.run(agent.run_agent(_fake_client(always_fails), [], max_step=10))
+        raise AssertionError("连续请求失败必须中止 Agent")
+    except LLMRequestError:
+        pass
+    assert calls == 3, "必须按 llm_request_max_failures 熔断，不能耗尽全部 Agent 步骤"
+
+
+def test_agent_step_limit_is_failure_not_empty_success():
+    calls = 0
+
+    class ToolLoopMessage:
+        def __init__(self, index):
+            self.content = None
+            self.tool_calls = [SimpleNamespace(
+                id=f"call-{index}",
+                function=SimpleNamespace(name="view_delayed_results", arguments="{}"),
+            )]
+
+        def model_dump(self):
+            return {"role": "assistant", "content": None, "tool_calls": []}
+
+    async def tool_loop(**kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(choices=[SimpleNamespace(message=ToolLoopMessage(calls))])
+
+    agent = Agent(AgentLoopBus())
+    try:
+        asyncio.run(agent.run_agent(_fake_client(tool_loop), [], max_step=2))
+        raise AssertionError("耗尽步骤必须明确失败")
+    except AgentStepLimitError:
+        pass
+    assert calls == 2
 
 class FakeTranscriptProvider:
     def __init__(self, cursor: int = 5):
@@ -290,7 +353,7 @@ def test_workflow_executor_offline():
     task = new_task("离线工作流", holder="super")
 
     wf = Workflow(name="OfflineWf", stages=[
-        Stage("s1", tools=("view",)),
+        Stage("s1", tools=("view",), instruction="只分析输入"),
         Stage("s2", tools=("write_latex", "check_latex")),
         Stage("s3", tools=("check_latex",)),
     ])
@@ -311,8 +374,58 @@ def test_workflow_executor_offline():
     # 结果按序传递: 下一阶段 prev 收到上一阶段输出
     assert calls[1][2] == ["out-s1"]
     assert calls[2][2] == ["out-s2"]
+    # 阶段自己的指令必须保留，不能在调度时退化成整个工作流的宽泛目标
+    assert wf.stages[0].instruction == "只分析输入"
     # 全部完成后 task 状态为 DONE
     assert task.status is TaskStatus.DONE
+
+
+def test_workflow_cancellation_is_persisted_as_failure():
+    """外层 wait_for 取消工作流时，阶段与工作流都必须结束为 failed。"""
+
+    class FakeStore:
+        def __init__(self):
+            self.stage_finishes = []
+            self.run_finishes = []
+
+        def begin(self, task_id, workflow_name, goal):
+            return "run-1"
+
+        def stage(self, run_id, name):
+            return "stage-1"
+
+        def finish_stage(self, stage_id, result=None, error=None):
+            self.stage_finishes.append((stage_id, result, error))
+
+        def finish(self, run_id, status):
+            self.run_finishes.append((run_id, status))
+
+        def add_artifact(self, *args):
+            raise AssertionError("取消的阶段不应登记产物")
+
+    g = make_gateway()
+    parent = g.issue("super", [
+        CapabilityGrant(Capability("view"), ToolPolicy(permission="allow"))
+    ])
+    task = new_task("会被取消的工作流", holder="super")
+    wf = Workflow(name="CancelledWf", stages=[Stage("s1", tools=("view",))])
+    store = FakeStore()
+
+    async def cancelled_runner(stage, passport, task_obj, prev):
+        raise asyncio.CancelledError()
+
+    async def run_case():
+        try:
+            await wf.run(g, parent, task, runner=cancelled_runner, store=store)
+            raise AssertionError("CancelledError 应向上抛出")
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_case())
+    assert task.status is TaskStatus.FAILED
+    assert store.run_finishes == [("run-1", "failed")]
+    assert len(store.stage_finishes) == 1
+    assert "CancelledError" in store.stage_finishes[0][2]
 
 
 def test_resident_cursor_commits_only_after_verification():

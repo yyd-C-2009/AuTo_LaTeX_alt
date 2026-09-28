@@ -24,30 +24,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BGE_DIR = ROOT / "models" / "bge-base-zh-v1.5"
 
-PYPI_MIRRORS = [
-    "https://pypi.tuna.tsinghua.edu.cn/simple",
-    "https://mirrors.aliyun.com/pypi/simple/",
-    "https://pypi.mirrors.ustc.edu.cn/simple/",
-]
-HF_MIRROR = "https://hf-mirror.com"
-
-PACKAGES = [
-    "openai>=1.0",
-    "pydantic>=2.0",
-    "pydantic-core>=2.0",
-    "annotated-types>=0.5",
-    "tiktoken>=0.5",
-    "chromadb>=0.4",
-    "sentence-transformers>=2.2",
-    "pix2text",
-    "PyMuPDF>=1.20",
-    "Pillow>=9.0",
-    "onnxruntime>=1.15",
-    "huggingface_hub>=0.20",
-    "faster-whisper>=1.0",
-    "sounddevice>=0.4",
-    "numpy",
-]
+SETUP_CONFIG = json.loads((ROOT / "setup.json").read_text(encoding="utf-8"))
+PYPI_MIRRORS = SETUP_CONFIG["pypi_mirrors"]
+HF_MIRROR = SETUP_CONFIG["huggingface_endpoint"]
+PACKAGES = SETUP_CONFIG["packages"]
 
 
 def run(cmd: list[str], description: str = "", env: dict | None = None) -> int:
@@ -72,7 +52,7 @@ def install_packages(mirror: str | None = None) -> None:
         cmd = [
             sys.executable, "-m", "pip", "install",
             "-i", m,
-            "--timeout", "120",
+            "--timeout", str(SETUP_CONFIG["pip_timeout_seconds"]),
             *PACKAGES,
         ]
         code = run(cmd, description="安装 Python 依赖")
@@ -191,10 +171,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AuTo_LaTeX 系统一键安装脚本")
     parser.add_argument("--with-ocr", action="store_true", help="额外预下载 Pix2Text OCR 模型（较慢）")
     parser.add_argument("--with-listener", action="store_true", help="预下载 Listener 的 Faster-Whisper 模型")
-    parser.add_argument("--listener-size", default=os.environ.get("LISTENER_MODEL_SIZE", "medium"),
+    parser.add_argument("--listener-size", default=SETUP_CONFIG["listener_model_size"],
                         help="Faster-Whisper 模型规模：tiny/base/small/medium/large-v3（默认 small）")
     parser.add_argument("--listener-source", choices=["modelscope", "hf"],
-                        default=os.environ.get("LISTENER_DOWNLOAD_SOURCE", "modelscope"),
+                        default=SETUP_CONFIG["listener_download_source"],
                         help="Listener 模型下载源：modelscope（默认，国内更稳）/ hf（hf-mirror）")
     parser.add_argument("--skip-models", action="store_true", help="只安装 Python 依赖，不下载任何模型")
     parser.add_argument("--skip-packages", action="store_true", help="跳过 pip 依赖安装，只下载模型")

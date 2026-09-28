@@ -20,7 +20,8 @@ from typing import Annotated
 
 
 # 默认工作根目录：本项目目录（可用环境变量覆盖，便于测试）
-_WORKDIR = os.path.abspath(os.path.dirname(__file__))
+_WORKDIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_PROTECTED_CONFIGS = {"settings.json", "runtime.json", "setup.json"}
 
 
 def _resolve(path: str) -> str:
@@ -38,6 +39,13 @@ def _resolve(path: str) -> str:
             f"路径越权：只允许访问工作目录 {_WORKDIR} 内的文件，收到 {path}"
         )
     return base
+
+
+def _ensure_not_protected(path: str) -> None:
+    """配置仅由人工维护，Agent 不得经此工具读取或修改。"""
+    relative = os.path.normcase(os.path.relpath(_resolve(path), _WORKDIR))
+    if relative in _PROTECTED_CONFIGS:
+        raise ValueError(f"受保护配置文件 {relative} 不允许通过 str_replace_editor 访问或修改")
 
 
 def _view(path: str, view_range: list[int] | None = None) -> str:
@@ -134,6 +142,7 @@ def str_replace_editor(
 ) -> dict:
     '''查看/创建/编辑工作目录内的文本文件：view 查看（带行号）、create 新建、str_replace 精确替换、insert 指定行插入。编辑前请先用 view 确认当前内容。'''
     try:
+        _ensure_not_protected(path)
         if command == "view":
             return {"Success": "True", "result": _view(path, view_range)}
         if command == "create":

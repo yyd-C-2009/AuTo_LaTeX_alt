@@ -37,7 +37,7 @@ def view_theorem_style(
             "\\cororef{coro:key} / \\defref{def:key} / \\exapref{exap:key}；ref 参数是完整标签。\n"
             "5. proof 不编号；solution 环境等价于 proof 的 Solution 标题；行间公式用 \\label 编号、\\eqref 引用。"
         )
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example.tex")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "example.tex")
     if not os.path.isfile(path):
         return f"错误: 规范文件不存在 {path}"
     try:

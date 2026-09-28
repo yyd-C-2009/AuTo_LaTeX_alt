@@ -1,0 +1,14 @@
+{
+  "agent_max_steps": 15,
+  "llm_request_max_failures": 3,
+  "llm_retry_backoff_seconds": 1.0,
+  "expert_timeout_seconds": 180,
+  "listener_expert_timeout_seconds": 1800,
+  "workflow_timeout_seconds": 600,
+  "resident_interval_seconds": 30,
+  "resident_max_messages": 40,
+  "require_acceptance_stage": true,
+  "acceptance_stage_experts": ["math", "mathwrite", "passagewrite", "draw"],
+  "acceptance_keywords": ["验收", "验证", "检查", "review", "verify", "check"]
+  ,"persistence_database": "runtime_state.db"
+}

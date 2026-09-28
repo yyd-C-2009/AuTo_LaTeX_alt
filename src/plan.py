@@ -17,10 +17,12 @@
 """
 
 import os
+import asyncio
+import shlex
 from datetime import date
 from typing import Annotated
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAN_DIR = os.path.join(BASE_DIR, "plan")
 
 
@@ -147,6 +149,104 @@ class Plan:
             return content
         except Exception as e:
             return f"读取长期事务失败：{type(e).__name__}: {e}"
+
+
+class ReminderScheduler:
+    """在程序运行期间轮询 SQLite 提醒；原子领取保证单次提醒不重复发送。"""
+
+    def __init__(self, task_store, bus, interval: float = 30):
+        self.task_store = task_store
+        self.bus = bus
+        self.interval = max(5.0, float(interval))
+
+    async def run(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        while True:
+            due = await asyncio.to_thread(self.task_store.due_reminders)
+            for item in due:
+                local_due = datetime.fromisoformat(item["due_at"]).astimezone(ZoneInfo(item["timezone"]))
+                text = (
+                    f"⏰ 提醒：{item['title']}（原定 {local_due.isoformat(timespec='minutes')}，"
+                    f"{item['timezone']}）"
+                )
+                if self.bus.renderer is not None:
+                    # 输入框等待期间 Bus.io_print 会被对话锁阻塞；网页正文与状态区可独立提醒。
+                    self.bus.renderer.body_write(text)
+                    self.bus.io_status("state", text)
+                else:
+                    await self.bus.io_print(text)
+            await asyncio.sleep(self.interval)
+
+
+def format_tasks(task_store, include_completed: bool = False) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    items = task_store.list_tasks(include_completed=include_completed)
+    if not items:
+        return "当前没有未完成的提醒任务。"
+    lines = []
+    for item in items:
+        due = datetime.fromisoformat(item["due_at"]).astimezone(ZoneInfo(item["timezone"]))
+        lines.append(
+            f"{item['id']} | {item['status']} | {due.isoformat(timespec='minutes')} "
+            f"({item['timezone']}, {item['repeat_rule']}) | {item['title']}"
+        )
+    return "\n".join(lines)
+
+
+async def handle_task_command(command: str, bus, task_store) -> bool:
+    """入口共用的提醒任务命令；所有修改均在命令行再次确认。"""
+    try:
+        parts = shlex.split(command)
+    except ValueError as exc:
+        await bus.io_print(f"参数解析失败：{exc}")
+        return True
+    if not parts or parts[0] not in ("tasks", "task"):
+        return False
+    if task_store is None:
+        await bus.io_print("任务存储尚未初始化。")
+        return True
+    action = parts[1] if len(parts) > 1 else "list"
+    if action in ("list", "show") and len(parts) <= 2:
+        await bus.io_print(format_tasks(task_store))
+        return True
+    if action == "complete" and len(parts) == 3:
+        item = task_store.get(parts[2])
+        if item is None or item["status"] != "active":
+            await bus.io_print("未找到仍待办的任务。")
+            return True
+        await bus.io_print(f"将完成并停止提醒：{item['title']}")
+        answer = await bus.io_dialog("确认完成？(y/n) ")
+        if answer.strip().lower() in ("y", "yes"):
+            await bus.io_print("任务已完成。" if task_store.complete(item["id"]) else "状态已改变，未执行。")
+        else:
+            await bus.io_print("已取消。")
+        return True
+    if action == "defer" and len(parts) in (4, 5):
+        item = task_store.get(parts[2])
+        if item is None or item["status"] != "active":
+            await bus.io_print("未找到仍待办的任务。")
+            return True
+        timezone = parts[4] if len(parts) == 5 else item["timezone"]
+        await bus.io_print(f"将 {item['title']} 延期至 {parts[3]}（{timezone}）")
+        answer = await bus.io_dialog("确认延期？(y/n) ")
+        if answer.strip().lower() in ("y", "yes"):
+            try:
+                changed = task_store.defer(item["id"], parts[3], timezone)
+                await bus.io_print("提醒时间已更新。" if changed else "状态已改变，未执行。")
+            except ValueError as exc:
+                await bus.io_print(f"延期失败：{exc}")
+        else:
+            await bus.io_print("已取消。")
+        return True
+    await bus.io_print(
+        "用法：/tasks | /task complete <ID> | /task defer <ID> <ISO时间> [时区]\n"
+        "新建任务请直接说“提醒我……”，系统确认时间后会保存。"
+    )
+    return True
 
 
 # ---------- 模板 ----------

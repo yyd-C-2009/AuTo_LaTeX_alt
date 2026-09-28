@@ -8,18 +8,25 @@ from pydantic_core import PydanticUndefined
 from functools import wraps
 from enum import Enum
 from Tools import Tools
-from Saver import Saver
 from event_bus import Bus,Message
 from text_clean import text_clean
 from render import get_renderer
 from runtime.gateway import CapabilityGateway, UnauthorizedTool
 from runtime.passport import Passport
 import asyncio
-from config import require
+from config import get, require
 
 client = None
 
 async_client = None   # 惰性：在 agent() 内部、拿到 DSH_OPENAI_KEY 后再创建
+
+
+class AgentStepLimitError(RuntimeError):
+    """Agent 在给定步骤预算内没有产生最终答复。"""
+
+
+class LLMRequestError(RuntimeError):
+    """连续多次模型请求失败，停止继续消耗 API 请求。"""
 
 
 def tool_call_add(message:list,content:str,tool_call_id:str):
@@ -90,7 +97,12 @@ class Agent:
         gateway.execute(passport, ...) 授权执行；不传则走原 tool_names/deny_tools 逻辑（零行为变化）。'''
         model = model or require("llm.model")
         max_step = max_step if max_step is not None else require("runtime.agent_max_steps")
+        if max_step <= 0:
+            raise ValueError("max_step 必须大于 0")
+        max_request_failures = int(get("runtime.llm_request_max_failures", 3))
+        retry_backoff_seconds = float(get("runtime.llm_retry_backoff_seconds", 1.0))
         steps = 0
+        consecutive_request_failures = 0
 
         # 新权限链路（可选，默认关闭以保持旧行为不变）
         use_gateway = gateway is not None and passport is not None
@@ -139,9 +151,20 @@ class Agent:
                     tool_choice="auto"
                 )
             except Exception as e:
-                print(f"LLM请求异常: {str(e)}")
+                consecutive_request_failures += 1
+                debug_status(
+                    f"LLM 请求失败 {consecutive_request_failures}/{max_request_failures}: "
+                    f"{type(e).__name__}"
+                )
+                if consecutive_request_failures >= max_request_failures:
+                    raise LLMRequestError(
+                        f"LLM 连续请求失败 {consecutive_request_failures} 次，已停止重试；"
+                        f"最后错误：{type(e).__name__}: {e}"
+                    ) from e
+                await asyncio.sleep(retry_backoff_seconds * consecutive_request_failures)
                 continue
 
+            consecutive_request_failures = 0
             msg = resp.choices[0].message
             messages.append(msg.model_dump())
 
@@ -224,8 +247,10 @@ class Agent:
                 continue
             return msg.content
 
-        debug_status("Timeout：agent 卡在工具调用")   # 超过 max_step 判定死循环
-        return None
+        debug_status(f"Agent 已耗尽 {max_step} 个步骤")
+        raise AgentStepLimitError(
+            f"Agent 在 {max_step} 个步骤内未产生最终答复，任务已终止而不是按成功处理。"
+        )
     async def _wait_pending(self, messages: list, poll_interval: float = 2.0, hard_timeout: float = 240.0):
         '''等待所有在途慢任务完成：只轮询 poll、不消耗 run_agent 的 step 计数，
         避免「等待慢任务」白烧 max_step 导致 Super 提前放弃（Timeout）。

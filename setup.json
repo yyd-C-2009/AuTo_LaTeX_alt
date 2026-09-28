@@ -1,0 +1,8 @@
+{
+  "pypi_mirrors": ["https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/", "https://pypi.mirrors.ustc.edu.cn/simple/"],
+  "huggingface_endpoint": "https://hf-mirror.com",
+  "pip_timeout_seconds": 120,
+  "listener_download_source": "modelscope",
+  "listener_model_size": "medium",
+  "packages": ["openai>=1.0", "pydantic>=2.0", "pydantic-core>=2.0", "annotated-types>=0.5", "tiktoken>=0.5", "chromadb>=0.4", "sentence-transformers>=2.2", "pix2text", "PyMuPDF>=1.20", "Pillow>=9.0", "onnxruntime>=1.15", "huggingface_hub>=0.20", "faster-whisper>=1.0", "sounddevice>=0.4", "numpy"]
+}

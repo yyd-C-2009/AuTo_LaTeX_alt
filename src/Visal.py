@@ -46,13 +46,26 @@ class Visal:
     ) -> List[int]:
         
         if pages is None:
-
-            return list(range(0,5))
-
-        elif not isinstance(pages,list) or pages and not isinstance(pages[0],int):
-            raise ValueError('PDF 文件 pages 必须为整数列表')
-
-        return pages
+            return list(range(0, 5))
+        if isinstance(pages, str):
+            values = []
+            for piece in pages.split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if "-" in piece:
+                    start, end = (int(value.strip()) for value in piece.split("-", 1))
+                    values.extend(range(start, end + 1))
+                else:
+                    values.append(int(piece))
+            pages = values
+        if not isinstance(pages, list) or any(not isinstance(page, int) for page in pages):
+            raise ValueError("PDF 页码请用正整数列表或 1,3-5 格式")
+        if any(page < 1 for page in pages):
+            raise ValueError("PDF 页码从 1 开始")
+        if not pages:
+            raise ValueError("请至少指定一个 PDF 页码")
+        return [page - 1 for page in pages]
 
     
     def recognize_image(self, image_path) -> dict[str,Any]:
@@ -97,7 +110,7 @@ class Visal:
     def recognize_doc(
         self,
         doc_path: Annotated[str,'PDF/PNG/JPG存放路径'] = None,
-        pages: Annotated[Optional[Union[str,list[int]]],'PDF页码编号, 最多识别5页，超出自动截断为前5页'] = None,
+        pages: Annotated[Optional[Union[str,list[int]]],'PDF页码（从1开始，可传整数列表或“1,3-5”），最多识别5页'] = None,
         return_text:Annotated[bool,'是否返回文本类型'] = True
     )->dict[str,Any]:
         '''
@@ -136,12 +149,16 @@ class Visal:
             all_text_parts = []
             all_inline = []
             all_display = []
+            source_pages = []
 
             with fitz.open(doc_path) as pdf_doc:
                 max_pages = len(pdf_doc)
                 for idx in pages:
                     if idx >= max_pages:
-                        break
+                        return {
+                            'Success': 'False', 'Error': f'PDF 不存在第 {idx + 1} 页',
+                            'inline formular': [], 'display formula': [], 'whole text': '',
+                        }
 
                     # —— 该页缓存检查：命中直接用，跳过该页 OCR ——
                     page_cache = self._cache_path(doc_path, page=idx)
@@ -162,6 +179,7 @@ class Visal:
                         self._save_cache(page_cache, r)
 
                     all_text_parts.append(r['whole text'])
+                    source_pages.append({"page": idx + 1, "text": r['whole text']})
                     all_inline.extend(r['inline formular'])
                     all_display.extend(r['display formula'])
 
@@ -170,7 +188,11 @@ class Visal:
                 'Error': '',
                 'inline formular': all_inline,
                 'display formula': all_display,
-                'whole text': '\n'.join(all_text_parts)
+                'whole text': '\n'.join(
+                    f"[来源页 {item['page']}]\n{item['text']}" for item in source_pages
+                ),
+                'source_pages': source_pages,
+                'source_file': os.path.basename(doc_path),
             }
 
         # —— 单张图片：整文件缓存 ——
@@ -178,6 +200,8 @@ class Visal:
         cached = self._load_cache(cache_path)
         if cached is not None:
             print(f"[OCR缓存命中] {cache_path}")
+            cached.setdefault('source_file', os.path.basename(doc_path))
+            cached.setdefault('source_pages', [{"page": 1, "text": cached.get('whole text', '')}])
             return cached
 
         result = self.recognize_image(doc_path)
@@ -185,6 +209,9 @@ class Visal:
         # —— 写入缓存 ——
         if result.get('Success') == 'True':
             self._save_cache(cache_path, result)
+        if result.get('Success') == 'True':
+            result.setdefault('source_file', os.path.basename(doc_path))
+            result.setdefault('source_pages', [{"page": 1, "text": result.get('whole text', '')}])
         return result
 
 if __name__ == '__main__':
